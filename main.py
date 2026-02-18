@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- GEMINI (Тільки 2.5 Flash) ---
+# --- GEMINI ---
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
@@ -51,7 +51,7 @@ def get_google_sheet():
         logging.error(f"Google Sheet Error: {e}")
         return None
 
-# --- ЗБЕРЕЖЕННЯ ---
+# --- ЗБЕРЕЖЕННЯ ЗАЯВКИ ---
 def save_to_sheet(data):
     sheet = get_google_sheet()
     if not sheet: return False
@@ -59,14 +59,35 @@ def save_to_sheet(data):
         c = data.get('client', {})
         answers = json.dumps(data.get('answers', {}), ensure_ascii=False)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        row = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), c.get('address'), answers]
+        # Колонки: Дата | Ім'я | Телефон | Тип | Адреса | JSON | ЗВІТ (пусто)
+        row = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), c.get('address'), answers, ""]
         sheet.append_row(row)
         return True
     except Exception as e:
         logging.error(f"Save Error: {e}")
         return False
 
-# --- КЛАВІАТУРИ ДЛЯ МЕНЕДЖЕРА ---
+# --- ЗБЕРЕЖЕННЯ ЗВІТУ В ТАБЛИЦЮ ---
+def save_report_to_cell(row_id, report_text):
+    sheet = get_google_sheet()
+    if not sheet: return
+    try:
+        # Оновлюємо 7-му колонку (G) у відповідному рядку
+        sheet.update_cell(row_id, 7, report_text)
+    except Exception as e:
+        logging.error(f"Report Save Error: {e}")
+
+# --- ОТРИМАННЯ ЗВІТУ З ТАБЛИЦІ ---
+def get_cached_report(row_id):
+    sheet = get_google_sheet()
+    if not sheet: return None
+    try:
+        # Беремо значення з 7-ї колонки
+        return sheet.cell(row_id, 7).value
+    except:
+        return None
+
+# --- КЛАВІАТУРИ ---
 def get_orders_keyboard():
     sheet = get_google_sheet()
     if not sheet: return None
@@ -74,7 +95,6 @@ def get_orders_keyboard():
     if len(rows) < 2: return None
 
     builder = InlineKeyboardBuilder()
-    # start=2 (пропускаємо заголовок)
     for i, row in enumerate(rows[1:], start=2):
         name = row[1] if len(row) > 1 else "Невідомо"
         phone = row[2] if len(row) > 2 else "..."
@@ -84,41 +104,42 @@ def get_orders_keyboard():
     builder.button(text="🔄 Оновити список", callback_data="show_list")
     return builder.as_markup()
 
-# --- ЛОГІКА МЕНЕДЖЕРА (АДМІНКА) ---
+# --- ЛОГІКА МЕНЕДЖЕРА ---
 
-# Обробка кнопки "🔐 Кабінет менеджера" та команди /admin
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
     kb = get_orders_keyboard()
     if kb:
-        await message.answer("📂 **Список активних заявок:**\nОберіть клієнта для перегляду:", reply_markup=kb)
+        await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else:
-        await message.answer("📭 Список заявок поки що порожній.")
+        await message.answer("📭 Список заявок порожній.")
 
 @dp.callback_query(F.data == "show_list")
 async def refresh_list(callback: CallbackQuery):
     kb = get_orders_keyboard()
-    msg = "📂 **Список активних заявок:**" if kb else "📭 Список заявок порожній."
+    msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
-# --- ПЕРЕГЛЯД КОРОТКОЇ КАРТКИ ---
+# --- ПЕРЕГЛЯД КАРТКИ (З ПЕРЕВІРКОЮ НАЯВНОСТІ ЗВІТУ) ---
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
     if not sheet:
-        await callback.message.answer("⚠️ Помилка доступу до таблиці.")
+        await callback.message.answer("⚠️ Помилка таблиці.")
         return
 
     try:
         row_data = sheet.row_values(row_id)
-        # 0-Дата, 1-Ім'я, 2-Тел, 3-Тип, 4-Адреса
         name = row_data[1] if len(row_data) > 1 else "-"
         phone = row_data[2] if len(row_data) > 2 else "-"
         obj_type = row_data[3] if len(row_data) > 3 else "-"
         address = row_data[4] if len(row_data) > 4 else "-"
+        
+        # Перевіряємо, чи є вже звіт у 7-й колонці (індекс 6 у списку)
+        existing_report = row_data[6] if len(row_data) > 6 else ""
 
         text = (
             f"👤 **Клієнт:** {name}\n"
@@ -128,46 +149,75 @@ async def view_order(callback: CallbackQuery):
         )
 
         kb = InlineKeyboardBuilder()
-        kb.button(text="📄 Згенерувати ТЗ (AI)", callback_data=f"gen_{row_id}")
+        
+        # ЛОГІКА КНОПКИ ЗВІТУ
+        if existing_report and len(existing_report) > 10:
+            # Якщо звіт вже є - кнопка "Відкрити"
+            kb.button(text="📂 Відкрити збережений звіт", callback_data=f"showrep_{row_id}")
+        else:
+            # Якщо звіту немає - кнопка "Згенерувати"
+            kb.button(text="✨ Згенерувати ТЗ (AI)", callback_data=f"gen_{row_id}")
+            
         kb.button(text="💰 Розрахунок", callback_data=f"calc_{row_id}")
         kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
-        kb.button(text="🔙 Назад до списку", callback_data="show_list")
+        kb.button(text="🔙 Назад", callback_data="show_list")
         kb.adjust(1) 
 
         await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
     except Exception as e:
-        await callback.message.answer("Заявку не знайдено (можливо, видалена).")
+        await callback.message.answer("Помилка даних заявки.")
 
-# --- ГЕНЕРАЦІЯ ЗВІТУ (КРАСИВИЙ СТИЛЬ) ---
+# --- ПОКАЗ ВЖЕ ЗБЕРЕЖЕНОГО ЗВІТУ ---
+@dp.callback_query(F.data.startswith("showrep_"))
+async def show_saved_report(callback: CallbackQuery):
+    row_id = int(callback.data.split("_")[1])
+    
+    report = get_cached_report(row_id)
+    if report:
+        # Додаємо кнопку "Оновити", якщо раптом треба перегенерувати
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔄 Перегенерувати (AI)", callback_data=f"gen_{row_id}")
+        kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
+        kb.adjust(1)
+        
+        await callback.message.edit_text(f"📋 **ЗБЕРЕЖЕНИЙ ЗВІТ:**\n\n{report}", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    else:
+        await callback.answer("Помилка: Звіт не знайдено.", show_alert=True)
+
+# --- ГЕНЕРАЦІЯ ЗВІТУ + ЗБЕРЕЖЕННЯ ---
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
-    await callback.message.answer("⏳ **Аналізую відповіді та формую паспорт об'єкта...**")
+    await callback.message.answer("⏳ **AI аналізує та зберігає звіт...**")
     
     try:
         row_data = sheet.row_values(row_id)
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
-            # ПРОМПТ ДЛЯ КРАСИВОГО ТА ЗРОЗУМІЛОГО ЗВІТУ
             prompt = f"""
             Ти професійний будівельний кошторисник.
-            Твоє завдання: Перетворити "сирі" дані JSON у професійний, чистий "Паспорт Об'єкта" для майстрів.
-            
+            Створи "Паспорт Об'єкта" для майстрів.
             СТИЛЬ:
-            - Використовуй жирний шрифт для ключів.
-            - Використовуй емодзі для розділів (наприклад: 🧱 Стіни, 💡 Електрика, 🚿 Санвузол).
-            - Структуруй відповіді по категоріях.
-            - Жодних порад, попереджень чи зайвого тексту. Тільки конкретика.
-            - Якщо відповідь "Так/Ні" - так і пиши.
-            
+            - Жирний шрифт для ключів.
+            - Емодзі для розділів.
+            - Жодних порад чи вступу. Тільки факти.
             ВХІДНІ ДАНІ: {raw_answers}
             """
             response = model.generate_content(prompt)
-            await callback.message.answer(f"📋 **ПАСПОРТ ОБ'ЄКТА**\n\n{response.text}", parse_mode="Markdown")
+            report_text = response.text
+            
+            # 1. ЗБЕРІГАЄМО В ТАБЛИЦЮ
+            save_report_to_cell(row_id, report_text)
+            
+            # 2. ПОКАЗУЄМО
+            kb = InlineKeyboardBuilder()
+            kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
+            
+            await callback.message.answer(f"📋 **ПАСПОРТ ОБ'ЄКТА (Збережено)**\n\n{report_text}", reply_markup=kb.as_markup(), parse_mode="Markdown")
         else:
             await callback.message.answer("⚠️ AI модуль не підключено.")
             
@@ -181,49 +231,42 @@ async def generate_report_action(callback: CallbackQuery):
 async def delete_order(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
-    
     try:
         sheet.delete_rows(row_id)
-        await callback.answer("✅ Заявку видалено!", show_alert=True)
+        await callback.answer("✅ Видалено!", show_alert=True)
         await refresh_list(callback)
     except Exception as e:
-        await callback.answer(f"Помилка видалення: {e}", show_alert=True)
+        await callback.answer(f"Помилка: {e}", show_alert=True)
 
 # --- ЗАГЛУШКА ПРОРАХУНКУ ---
 @dp.callback_query(F.data.startswith("calc_"))
 async def calc_stub(callback: CallbackQuery):
-    await callback.answer("Тут буде модуль розрахунку за вашими формулами.", show_alert=True)
+    await callback.answer("Скоро тут будуть цифри 💵", show_alert=True)
 
-# --- СТАРТ (ПРИВІТАННЯ) ---
+# --- СТАРТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    # Гарна клавіатура з кнопкою адміна
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))],
             [KeyboardButton(text="🔐 Кабінет менеджера")]
-        ],
-        resize_keyboard=True
+        ], resize_keyboard=True
     )
-    
-    welcome_text = (
+    await message.answer(
         f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
-        "Я — ваш помічник у розрахунку вартості ремонту. "
-        "Допоможу швидко сформувати кошторис та визначити обсяг робіт.\n\n"
-        "👇 **Натисніть кнопку 'Заповнити анкету', щоб почати.**\n"
-        "Це займе менше хвилини!"
+        "Я допоможу сформувати кошторис та визначити обсяг робіт.\n"
+        "Натисніть **'Заповнити анкету'**, щоб почати.", 
+        reply_markup=kb, parse_mode="Markdown"
     )
-    
-    await message.answer(welcome_text, reply_markup=kb, parse_mode="Markdown")
 
-# --- ВЕБХУК (ПРИЙОМ ДАНИХ) ---
+# --- ВЕБХУК ---
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     data = json.loads(message.web_app_data.data)
     if save_to_sheet(data):
-        await message.answer("✅ **Дякуємо! Вашу заявку прийнято.**\nМенеджер зв'яжеться з вами найближчим часом.", parse_mode="Markdown")
+        await message.answer("✅ **Заявку прийнято!** Очікуйте дзвінка.", parse_mode="Markdown")
     else:
-        await message.answer("⚠️ Сталася помилка збереження. Спробуйте ще раз.")
+        await message.answer("⚠️ Помилка. Спробуйте ще раз.")
 
 async def on_startup(bot: Bot):
     await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
