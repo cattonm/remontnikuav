@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from datetime import datetime
+import asyncio
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -21,17 +22,27 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
-# Налаштування Gemini (актуальна модель 1.5 Flash)
+# Налаштування Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash') # Ця модель працює!
 else:
     model = None
-    logging.warning("⚠️ GEMINI_API_KEY не налаштовано в Environment Variables!")
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# --- ФУНКЦІЯ ДЛЯ ДОВГИХ ПОВІДОМЛЕНЬ ---
+async def send_long_message(message: Message, text: str):
+    if len(text) <= 4000:
+        await message.answer(text, parse_mode=None) # Без Markdown, щоб уникнути помилок форматування
+    else:
+        # Ріжемо на шматки по 4000 символів
+        for i in range(0, len(text), 4000):
+            chunk = text[i:i+4000]
+            await message.answer(chunk, parse_mode=None)
+            await asyncio.sleep(0.5) # Пауза, щоб Телеграм не заблокував
 
 # --- ЗБЕРЕЖЕННЯ В БАЗУ ---
 def save_order(data):
@@ -41,8 +52,7 @@ def save_order(data):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 orders = json.load(f)
-        except Exception:
-            orders = []
+        except: orders = []
     
     data['created_at'] = datetime.now().isoformat()
     orders.append(data)
@@ -50,38 +60,52 @@ def save_order(data):
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(orders, f, ensure_ascii=False, indent=4)
 
-# --- ОБРОБКА ПОВІДОМЛЕНЬ ---
+# --- ОБРОБКА ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     kb = [[KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))]]
-    keyboard = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-    await message.answer("Вітаю! Натисніть кнопку нижче, щоб розпочати опитування 👇", reply_markup=keyboard)
+    await message.answer(f"Вітаю! Натисніть кнопку для запуску 👇", reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
 
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     try:
         payload = json.loads(message.web_app_data.data)
-        save_order(payload) # Зберігаємо дані відразу
+        save_order(payload)
         
-        answers = payload.get('answers', {})
         client = payload.get('client', {})
+        answers = payload.get('answers', {})
         
-        summary_text = f"👤 **Клієнт:** {client.get('name')}\n📞 **Тел:** {client.get('phone')}\n🏠 **Об'єкт:** {client.get('object_type')}\n\n⏳ Обробляю дані через AI..."
-        await message.answer(summary_text)
+        # 1. Підтвердження отримання
+        info_msg = (
+            f"✅ Дані отримано!\n"
+            f"👤 {client.get('name')} ({client.get('phone')})\n"
+            f"🏠 {client.get('object_type')}\n"
+            f"⏳ Генерую детальний звіт..."
+        )
+        await message.answer(info_msg)
 
+        # 2. Робота з AI
         if model:
-            # Формуємо промпт для Gemini
-            prompt = f"Ти професійний будівельник. Сформуй ТЗ на основі відповідей клієнта: {json.dumps(answers, ensure_ascii=False)}. Клієнт: {client.get('name')}, об'єкт: {client.get('object_type')}."
-            response = model.generate_content(prompt)
-            await message.answer(f"✅ **Звіт Gemini:**\n\n{response.text}")
-        else:
-            await message.answer("❌ Звіт AI недоступний (відсутній API Key).")
+            prompt = (
+                f"Ти досвідчений виконроб. Проаналізуй цей об'єкт:\n"
+                f"Клієнт: {client.get('name')}, Об'єкт: {client.get('object_type')}, Адреса: {client.get('address')}.\n"
+                f"Відповіді по ремонту: {json.dumps(answers, ensure_ascii=False)}\n\n"
+                f"ЗАВДАННЯ:\n"
+                f"1. Напиши детальне Технічне Завдання (ТЗ) по етапах.\n"
+                f"2. Вкажи, на що звернути увагу (ризики).\n"
+                f"3. Орієнтовний список чорнових матеріалів."
+            )
             
-    except Exception as e:
-        logging.error(f"Помилка: {e}")
-        await message.answer(f"⚠️ Сталася помилка: {e}")
+            response = model.generate_content(prompt)
+            # Використовуємо безпечну функцію відправки
+            await send_long_message(message, response.text)
+        else:
+            await message.answer("⚠️ AI не налаштовано.")
 
-# --- WEBHOOK ---
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        await message.answer(f"Сталася помилка: {e}")
+
 async def on_startup(bot: Bot):
     await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
 
