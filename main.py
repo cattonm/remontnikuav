@@ -25,7 +25,7 @@ WEBAPP_URL = "https://remontnikuav.netlify.app"
 # Налаштування Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.0-flash-exp') # Використовуємо швидку модель
+    model = genai.GenerativeModel('gemini-2.5-flash') # Використовуємо швидку модель
 else:
     model = None
 
