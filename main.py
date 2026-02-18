@@ -3,7 +3,6 @@ import json
 import logging
 import sys
 from datetime import datetime
-import asyncio
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -12,9 +11,15 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 import google.generativeai as genai
 
+# Для роботи з Google Таблицями
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 # --- КОНФІГУРАЦІЯ ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') # Сюди вставимо вміст JSON-файлу
+SPREADSHEET_NAME = "Заявки Ремонт" # Назва вашої таблиці (має співпадати точно!)
 
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
@@ -22,195 +27,214 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
-# Налаштування Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash') # Використовуємо швидку модель
-else:
-    model = None
-
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+
+# --- ПІДКЛЮЧЕННЯ ДО СЕРВІСІВ ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- РОБОТА З БАЗОЮ ДАНИХ ---
-DB_FILE = "orders_db.json"
+# 1. Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-2.5-flash-latest')
+else:
+    model = None
 
-def save_order(data):
-    orders = get_all_orders()
-    # Генеруємо унікальний ID на основі часу, щоб не плутатись
-    data['id'] = str(int(datetime.now().timestamp()))
-    data['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    orders.append(data)
+# 2. Google Sheets
+def get_gspread_client():
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        # Завантажуємо ключі з змінної оточення Render
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        logging.error(f"Помилка підключення до Google Sheets: {e}")
+        return None
+
+# --- ЗБЕРЕЖЕННЯ В ТАБЛИЦЮ ---
+def save_to_sheet(data):
+    client = get_gspread_client()
+    if not client: return "Error"
     
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(orders, f, ensure_ascii=False, indent=4)
-    return data['id']
+    try:
+        sheet = client.open(SPREADSHEET_NAME).sheet1
+        
+        # Формуємо рядок для таблиці
+        c = data.get('client', {})
+        answers_str = json.dumps(data.get('answers', {}), ensure_ascii=False)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        # Порядок колонок: Дата | Ім'я | Телефон | Тип | Адреса | Відповіді (JSON)
+        row = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), c.get('address'), answers_str]
+        
+        sheet.append_row(row)
+        return timestamp # Повертаємо ID (в нашому випадку час)
+    except Exception as e:
+        logging.error(f"Не вдалося записати в таблицю: {e}")
+        return "Error"
 
-def get_all_orders():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: return []
-    return []
+# --- ПОШУК ЗАЯВКИ (З таблиці) ---
+def find_order_in_sheet(phone_query):
+    client = get_gspread_client()
+    if not client: return None
+    
+    try:
+        sheet = client.open(SPREADSHEET_NAME).sheet1
+        records = sheet.get_all_records() # Це працює, якщо перший рядок - заголовки
+        # Якщо заголовків немає, краще використовувати get_all_values()
+        
+        # Шукаємо по телефону (3 колонка, індекс 2 у списку, або по ключу якщо є заголовки)
+        # Припустимо, ми просто беремо всі значення і шукаємо
+        rows = sheet.get_all_values()
+        
+        for i, row in enumerate(rows):
+            # row[2] - це телефон (за логікою save_to_sheet)
+            if len(row) > 2 and phone_query in str(row[2]): 
+                # Повертаємо структуру даних
+                return {
+                    "id": i, # номер рядка як ID
+                    "client": {
+                        "name": row[1],
+                        "phone": row[2],
+                        "object_type": row[3],
+                        "address": row[4]
+                    },
+                    "answers": json.loads(row[5]) if len(row) > 5 else {}
+                }
+        return None
+    except Exception as e:
+        logging.error(f"Помилка пошуку: {e}")
+        return None
 
-def get_order_by_id(order_id):
-    orders = get_all_orders()
-    for order in orders:
-        if order.get('id') == order_id:
-            return order
-    return None
-
-# --- АДМІН-ПАНЕЛЬ: СПИСОК ЗАЯВОК ---
+# --- АДМІНКА ---
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
-    orders = get_all_orders()
-    if not orders:
-        await message.answer("📂 База заявок порожня.")
+    await message.answer(
+        "👨‍💼 **Панель менеджера**\n\n"
+        "Щоб знайти анкету, введіть команду:\n"
+        "`/find 0501234567` (номер телефону)\n\n"
+        "Або відкрийте Google Таблицю для повного списку."
+    )
+
+@dp.message(Command("find"))
+async def cmd_find(message: Message):
+    try:
+        phone = message.text.split()[1]
+    except IndexError:
+        await message.answer("⚠️ Введіть номер: `/find 098...`")
         return
 
-    # Створюємо кнопки для кожної заявки
-    builder = []
-    # Показуємо останні 10 заявок (нові зверху)
-    for order in reversed(orders[-10:]):
-        client = order.get('client', {})
-        btn_text = f"{client.get('name')} | {client.get('phone')}"
-        # В callback_data передаємо ID замовлення
-        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"order_{order.get('id')}")])
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=builder)
-    await message.answer("🗂 **Список останніх заявок:**", reply_markup=keyboard)
-
-# --- ОБРОБКА ВИБОРУ ЗАЯВКИ ---
-@dp.callback_query(F.data.startswith("order_"))
-async def process_order_selection(callback: CallbackQuery):
-    order_id = callback.data.split("_")[1]
-    order = get_order_by_id(order_id)
-    
+    order = find_order_in_sheet(phone)
     if not order:
-        await callback.message.answer("Заявку не знайдено.")
+        await message.answer("❌ Заявку з таким номером не знайдено в таблиці.")
         return
 
-    client = order.get('client', {})
+    c = order['client']
+    text = (
+        f"📂 **Знайдено заявку!**\n"
+        f"👤 {c['name']}\n"
+        f"📞 {c['phone']}\n"
+        f"🏠 {c['object_type']}\n"
+        f"📍 {c['address']}"
+    )
     
-    # Меню дій для конкретної заявки
+    # Кнопки дій
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📄 Структурований звіт (AI)", callback_data=f"report_{order_id}")],
-        [InlineKeyboardButton(text="💰 Прорахунок (Калькулятор)", callback_data=f"calc_{order_id}")]
+        [InlineKeyboardButton(text="📄 Звіт для менеджера", callback_data=f"rep_{c['phone']}")],
+        [InlineKeyboardButton(text="💰 Калькулятор", callback_data=f"calc_{c['phone']}")]
     ])
     
-    text = (
-        f"👤 **Клієнт:** {client.get('name')}\n"
-        f"📞 **Телефон:** {client.get('phone')}\n"
-        f"🏠 **Об'єкт:** {client.get('object_type')}\n"
-        f"📅 **Дата:** {order.get('created_at')}"
-    )
+    await message.answer(text, reply_markup=kb)
+
+# --- ГЕНЕРАЦІЯ ЗВІТУ ---
+@dp.callback_query(F.data.startswith("rep_"))
+async def make_report(callback: CallbackQuery):
+    phone = callback.data.split("_")[1]
+    order = find_order_in_sheet(phone)
     
-    await callback.message.answer(text, reply_markup=kb)
+    if not order or not model:
+        await callback.message.answer("Помилка доступу до даних.")
+        return
+
+    await callback.message.answer("⏳ Формую картку об'єкта...")
+
+    # --- МЕНЕДЖЕРСЬКИЙ ПРОМПТ ---
+    # Чіткий, структурований, без води.
+    prompt = f"""
+    РОЛЬ: Ти помічник виконроба. Твоя мета - створити стислу "Картку Об'єкта" для менеджера.
+    МОВА: Українська.
+    
+    ДАНІ КЛІЄНТА:
+    {json.dumps(order['client'], ensure_ascii=False)}
+    
+    ТЕХНІЧНІ ВІДПОВІДІ (АНКЕТА):
+    {json.dumps(order['answers'], ensure_ascii=False)}
+    
+    ЗАВДАННЯ: Сформуй звіт у такому форматі:
+    
+    📍 **ОБ'ЄКТ**: [Тип] за адресою [Адреса]
+    👤 **КЛІЄНТ**: [Ім'я], [Телефон]
+    
+    🔨 **ОСНОВНІ РОБОТИ**:
+    - Підлога: [Що вибрано]
+    - Стіни: [Що вибрано]
+    - Стеля: [Що вибрано]
+    - Двері: [Деталі]
+    
+    ⚠️ **ВАЖЛИВІ НЮАНСИ**:
+    (Тут випиши, якщо є: тепла підлога, перепланування, або специфічні побажання з анкети. Якщо немає - пропусти).
+    
+    📋 **РЕКОМЕНДОВАНІ НАСТУПНІ КРОКИ**:
+    (Коротко: наприклад "Виїзд на замір", "Розрахунок чорнових матеріалів").
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        await callback.message.answer(response.text)
+    except Exception as e:
+        await callback.message.answer(f"Помилка AI: {e}")
+        
     await callback.answer()
 
-# --- ДІЯ 1: ГЕНЕРАЦІЯ СУХОГО ЗВІТУ ---
-@dp.callback_query(F.data.startswith("report_"))
-async def generate_report(callback: CallbackQuery):
-    order_id = callback.data.split("_")[1]
-    order = get_order_by_id(order_id)
-    answers = order.get('answers', {})
-    client = order.get('client', {})
-
-    await callback.message.answer("⏳ Генерую звіт...")
-
-    if model:
-        # НОВИЙ ЖОРСТКИЙ ПРОМПТ
-        prompt = f"""
-        РОЛЬ: Ти технічний секретар. Твоя єдина задача - структурувати дані.
-        ЗАБОРОНЕНО: Вигадувати, додумувати, давати оцінку, писати вступні слова типу "Як досвідчений виконроб".
-        
-        ЗАВДАННЯ:
-        Перетвори цей JSON у чіткий текстовий список українською мовою.
-        
-        ФОРМАТ ВІДПОВІДІ:
-        1. ДАНІ КЛІЄНТА:
-           - [Ім'я]
-           - [Телефон]
-           - [Адреса]
-        
-        2. ПАРАМЕТРИ ОБ'ЄКТА:
-           - [Список відповідей з анкети: питання - відповідь]
-        
-        ВХІДНІ ДАНІ:
-        Клієнт: {json.dumps(client, ensure_ascii=False)}
-        Відповіді: {json.dumps(answers, ensure_ascii=False)}
-        """
-        
-        try:
-            response = model.generate_content(prompt)
-            await callback.message.answer(f"📋 **ЗВІТ ПО ЗАЯВЦІ:**\n\n{response.text}")
-        except Exception as e:
-            await callback.message.answer(f"Помилка AI: {e}")
-    else:
-        await callback.message.answer("AI не налаштовано.")
-    
-    await callback.answer()
-
-# --- ДІЯ 2: ПРОРАХУНОК (ЛОГІКА) ---
 @dp.callback_query(F.data.startswith("calc_"))
-async def calculate_price(callback: CallbackQuery):
-    order_id = callback.data.split("_")[1]
-    order = get_order_by_id(order_id)
-    answers = order.get('answers', {})
-    
-    # Спроба знайти площу
-    area_str = str(answers.get('area', '0'))
-    # Видаляємо все крім цифр
-    area_clean = ''.join(filter(str.isdigit, area_str))
-    area = int(area_clean) if area_clean else 0
-    
-    # Примітивна логіка для прикладу (можна ускладнити)
-    base_price = 100 # Ціна за м2 (умовна робота)
-    material_coef = 1.0
-    
-    if "Ламінат" in str(answers): material_coef += 0.2
-    if "Паркет" in str(answers): material_coef += 0.5
-    if "Натяжна" in str(answers): material_coef += 0.1
-    
-    total = area * base_price * material_coef * 40 # *40 курс (умовно)
-    
-    text = (
-        f"💰 **Попередній розрахунок:**\n"
-        f"📏 Площа: {area} м²\n"
-        f"📊 Коефіцієнт складності: {material_coef}\n"
-        f"--------------------------\n"
-        f"💵 **Орієнтовна вартість:** {total:,.0f} грн\n\n"
-        f"*(Цей розрахунок є автоматичним і потребує уточнення майстром)*"
-    )
-    
-    await callback.message.answer(text)
+async def calc_stub(callback: CallbackQuery):
+    await callback.message.answer("🧮 Тут буде модуль прорахунку (чекаю формули).")
     await callback.answer()
 
-# --- СТАНДАРТНІ ХЕНДЛЕРИ ---
+# --- ПРИЙОМ ДАНИХ (WEBHOOK) ---
+@dp.message(F.content_type == ContentType.WEB_APP_DATA)
+async def web_app_data_handler(message: Message):
+    data = json.loads(message.web_app_data.data)
+    
+    # 1. Зберігаємо в Google Таблицю
+    save_to_sheet(data)
+    
+    # 2. Відповідь клієнту (мінімалізм)
+    await message.answer("👍 Вашу заявку прийнято!")
+
+    # 3. АДМІНУ (Миттєве сповіщення з адресою!)
+    c = data.get('client', {})
+    
+    admin_text = (
+        f"🔔 **НОВЕ ЗАМОВЛЕННЯ!**\n\n"
+        f"👤 {c.get('name')}\n"
+        f"📞 {c.get('phone')}\n"
+        f"🏠 {c.get('object_type')}\n"
+        f"📍 {c.get('address')}"
+    )
+    # Надіслати адміну в особисті (ВСТАВ СВІЙ ID ТУТ)
+    try:
+        await bot.send_message(chat_id=123456789, text=admin_text) # Замінити 123456789 на ID
+    except Exception as e:
+        logging.error(f"Не вдалося надіслати адміну: {e}")
+
+# --- ЗАПУСК ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     kb = [[KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))]]
-    await message.answer(
-        "Вітаю! Я бот для збору даних.\n"
-        "Для клієнта: натисніть кнопку внизу.\n"
-        "Для менеджера: введіть /admin щоб бачити заявки.", 
-        reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-    )
-
-@dp.message(F.content_type == ContentType.WEB_APP_DATA)
-async def web_app_data_handler(message: Message):
-    try:
-        data = json.loads(message.web_app_data.data)
-        save_order(data)
-        await message.answer("✅ Дані успішно збережено! Менеджер скоро зв'яжеться з вами.")
-        
-        # Повідомляємо адміна (тебе), що прийшла нова заявка
-        # await bot.send_message(chat_id="ТВІЙ_ID", text="🔔 Нова заявка! Натисни /admin")
-        
-    except Exception as e:
-        await message.answer(f"Помилка: {e}")
+    await message.answer("Вітаю! Заповніть дані.", reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
 
 async def on_startup(bot: Bot):
     await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
@@ -224,3 +248,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
