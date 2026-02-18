@@ -26,7 +26,7 @@ WEBAPP_URL = "https://remontnikuav.netlify.app" # Твій сайт
 # Налаштування Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel('gemini-3-pro-previewʼ)
 else:
     logging.warning("⚠️ GEMINI_API_KEY не знайдено! AI не працюватиме.")
 
