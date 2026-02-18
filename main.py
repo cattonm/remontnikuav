@@ -8,8 +8,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # --- КОНФІГУРАЦІЯ ---
-BOT_TOKEN = "ТВІЙ_ТОКЕН_ТУТ"  # Встав сюди свій токен
-SPREADSHEET_NAME = "Назва Твоєї Таблиці"  # Точна назва таблиці в Google Sheets
+BOT_TOKEN = "8264242241:AAFCkITlx-nUPLb4IczYaUWnyma0d_-WZ04" # Встав сюди свій токен
+SPREADSHEET_NAME = "remonts sheets"  # Точна назва таблиці в Google Sheets
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
