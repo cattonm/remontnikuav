@@ -2,115 +2,86 @@ import os
 import json
 import logging
 import sys
-import asyncio
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, ContentType, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo, FSInputFile
+from aiogram.types import Message, ContentType, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 import google.generativeai as genai
 
 # --- КОНФІГУРАЦІЯ ---
-# Встав сюди свої ключі
-BOT_TOKEN = "8550961266:AAGrj-GcUDrk37MIrdtXD6uaAd418w2qS6A"
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') # Або встав ключ текстом сюди, якщо тестуєш
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
 WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
-WEBAPP_URL = "https://remontnikuav.netlify.app" # Твій сайт
+WEBAPP_URL = "https://remontnikuav.netlify.app"
 
-# Налаштування Gemini
+# Налаштування Gemini (актуальна модель 1.5 Flash)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-3-pro-previewʼ)
+    model = genai.GenerativeModel('gemini-1.5-flash')
 else:
-    logging.warning("⚠️ GEMINI_API_KEY не знайдено! AI не працюватиме.")
+    model = None
+    logging.warning("⚠️ GEMINI_API_KEY не налаштовано в Environment Variables!")
 
-# Логи
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- ФУНКЦІЯ ЗБЕРЕЖЕННЯ (БАЗА ДАНИХ) ---
+# --- ЗБЕРЕЖЕННЯ В БАЗУ ---
 def save_order(data):
-    file_name = "orders_db.json"
-    existing_data = []
-    
-    # Читаємо старі записи, якщо є
-    if os.path.exists(file_name):
+    file_path = "orders_db.json"
+    orders = []
+    if os.path.exists(file_path):
         try:
-            with open(file_name, "r", encoding="utf-8") as f:
-                existing_data = json.load(f)
-        except:
-            pass
-            
-    # Додаємо дату і записуємо
-    data['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    existing_data.append(data)
+            with open(file_path, "r", encoding="utf-8") as f:
+                orders = json.load(f)
+        except Exception:
+            orders = []
     
-    with open(file_name, "w", encoding="utf-8") as f:
-        json.dump(existing_data, f, ensure_ascii=False, indent=4)
+    data['created_at'] = datetime.now().isoformat()
+    orders.append(data)
     
-    logging.info(f"💾 Замовлення збережено. Всього записів: {len(existing_data)}")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=4)
 
-# --- ЗАПУСК ---
+# --- ОБРОБКА ПОВІДОМЛЕНЬ ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     kb = [[KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))]]
-    await message.answer("Вітаю! Заповніть дані про об'єкт 👇", reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
+    keyboard = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    await message.answer("Вітаю! Натисніть кнопку нижче, щоб розпочати опитування 👇", reply_markup=keyboard)
 
-# --- ОБРОБКА ДАНИХ ---
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     try:
-        # 1. Отримуємо "сирі" дані
-        data = json.loads(message.web_app_data.data)
-        answers = data.get('answers', {})
-        client_info = data.get('client', {})
+        payload = json.loads(message.web_app_data.data)
+        save_order(payload) # Зберігаємо дані відразу
         
-        # 2. Зберігаємо в "Базу"
-        save_order(data)
+        answers = payload.get('answers', {})
+        client = payload.get('client', {})
         
-        await message.answer("⏳ Дані отримано. Обробляю через Gemini...")
+        summary_text = f"👤 **Клієнт:** {client.get('name')}\n📞 **Тел:** {client.get('phone')}\n🏠 **Об'єкт:** {client.get('object_type')}\n\n⏳ Обробляю дані через AI..."
+        await message.answer(summary_text)
 
-        # 3. Формуємо запит для Gemini
-        prompt = f"""
-        Ти - професійний кошторисник та виконроб. Проаналізуй дані клієнта та об'єкта.
-        
-        КЛІЄНТ: {client_info.get('name')}, Тел: {client_info.get('phone')}
-        ОБ'ЄКТ: {client_info.get('object_type')}, {client_info.get('address')}
-        
-        ТЕХНІЧНІ ПАРАМЕТРИ (ВІДПОВІДІ):
-        """
-        for k, v in answers.items():
-            prompt += f"- {k}: {v}\n"
-            
-        prompt += """
-        ЗАВДАННЯ:
-        1. Сформуй професійний опис об'єкта (summary).
-        2. Виділи потенційні складні моменти (наприклад, прихований монтаж дверей).
-        3. Склади список основних етапів робіт на основі цих даних.
-        """
-
-        # 4. Відправляємо в Gemini
-        if GEMINI_API_KEY:
+        if model:
+            # Формуємо промпт для Gemini
+            prompt = f"Ти професійний будівельник. Сформуй ТЗ на основі відповідей клієнта: {json.dumps(answers, ensure_ascii=False)}. Клієнт: {client.get('name')}, об'єкт: {client.get('object_type')}."
             response = model.generate_content(prompt)
-            ai_text = response.text
+            await message.answer(f"✅ **Звіт Gemini:**\n\n{response.text}")
         else:
-            ai_text = "⚠️ Gemini API Key не налаштовано."
-
-        # 5. Віддаємо результат
-        await message.answer(f"✅ **ЗВІТ ПО ОБ'ЄКТУ**\n\n{ai_text}", parse_mode="Markdown")
-        
+            await message.answer("❌ Звіт AI недоступний (відсутній API Key).")
+            
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await message.answer(f"Помилка: {e}")
+        logging.error(f"Помилка: {e}")
+        await message.answer(f"⚠️ Сталася помилка: {e}")
 
-# --- WEBHOOK SETUP ---
+# --- WEBHOOK ---
 async def on_startup(bot: Bot):
     await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
 
