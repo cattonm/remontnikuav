@@ -24,7 +24,7 @@ WEBAPP_URL = "https://remontnikuav.netlify.app"
 # Налаштування Gemini (актуальна модель 1.5 Flash)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 else:
     model = None
     logging.warning("⚠️ GEMINI_API_KEY не налаштовано в Environment Variables!")
