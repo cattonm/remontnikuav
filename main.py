@@ -29,6 +29,10 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
+# --- БЕЗПЕКА ---
+ADMIN_PASSWORD = "IlOvErEmOnTUA26#A"
+authorized_admins = set()
+
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 bot = Bot(token=BOT_TOKEN)
@@ -37,7 +41,7 @@ dp = Dispatcher()
 # --- GEMINI ---
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 else:
     model = None
 
@@ -127,8 +131,9 @@ def calculate_budget(data_json):
     for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Підсвітка робочої поверхні"]:
         if tech in k_other: sockets += 1
 
+    # Оновлені ціни на електрику
     if answers.get("electricity_done") == "Ні":
-        costs["electric"][0] += total_area * 2100; costs["electric"][1] += total_area * 1100; costs["electric"][2] += total_area * 1100
+        costs["electric"][0] += total_area * 1200; costs["electric"][1] += total_area * 800; costs["electric"][2] += total_area * 800
     costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
 
     # 3. ДВЕРІ
@@ -226,9 +231,23 @@ def get_orders_keyboard():
     builder.button(text="🔄 Оновити список", callback_data="show_list")
     return builder.as_markup()
 
+# --- ЛОГІКА АВТОРИЗАЦІЇ ---
+@dp.message(F.text == ADMIN_PASSWORD)
+async def auth_admin(message: Message):
+    authorized_admins.add(message.from_user.id)
+    try:
+        await message.delete() # Видаляємо повідомлення з паролем заради безпеки
+    except:
+        pass
+    await message.answer("✅ **Доступ дозволено!** Тепер ви можете використовувати Кабінет менеджера.", parse_mode="Markdown")
+
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
+    if message.from_user.id not in authorized_admins:
+        await message.answer("⛔️ **Доступ заборонено.**\nБудь ласка, введіть пароль у чат для доступу до кабінету.", parse_mode="Markdown")
+        return
+
     kb = get_orders_keyboard()
     if kb:
         await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
@@ -237,12 +256,16 @@ async def open_admin_panel(message: Message):
 
 @dp.callback_query(F.data == "show_list")
 async def refresh_list(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     kb = get_orders_keyboard()
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     if not sheet: return
@@ -257,7 +280,7 @@ async def view_order(callback: CallbackQuery):
 
         text = (
             f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n"
-            f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса:** {address}"
+            f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Логістика:** {address}"
         )
 
         kb = InlineKeyboardBuilder()
@@ -277,6 +300,8 @@ async def view_order(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("showrep_"))
 async def show_saved_report(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     row_id = int(callback.data.split("_")[1])
     report = get_cached_report(row_id)
     if report:
@@ -288,9 +313,11 @@ async def show_saved_report(callback: CallbackQuery):
     else:
         await callback.answer("Звіт не знайдено.", show_alert=True)
 
-# --- ГЕНЕРАЦІЯ ЗВІТУ (АБСОЛЮТНО БЕЗПЕЧНИЙ HTML) ---
+# --- ГЕНЕРАЦІЯ ЗВІТУ ---
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
@@ -300,7 +327,6 @@ async def generate_report_action(callback: CallbackQuery):
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
-            # Новий жорсткий промпт, який забороняє вигадувати назви кімнат і ламати теги
             prompt = (
                 f"Ти професійний виконроб. Створи гарний та структурований звіт (технічне завдання) по об'єкту на основі даних нижче.\n"
                 f"СУВОРА ВИМОГА: Використовуй ВИКЛЮЧНО ті назви приміщень, які є в даних (Передпокій, Кухня, Балкон, Гардероб, Підвал, Горище, Санвузол, Кімната). "
@@ -311,14 +337,11 @@ async def generate_report_action(callback: CallbackQuery):
             )
             response = model.generate_content(prompt)
             
-            # Чистимо текст від будь-яких артефактів, які може залишити Gemini
             report_text = response.text.replace("```html", "").replace("```", "").strip()
-            # Примусово видаляємо всі можливі варіанти тегів <br>, <ul>, <li>
             report_text = re.sub(r'<br\s*/?>', '\n', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'</?ul>', '', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'<li>', '- ', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'</li>', '\n', report_text, flags=re.IGNORECASE)
-            # Видаляємо маркдаун-зірочки (щоб уникнути помилок парсингу)
             report_text = report_text.replace("**", "").replace("*", "")
             
             save_report_to_cell(row_id, report_text)
@@ -333,9 +356,11 @@ async def generate_report_action(callback: CallbackQuery):
         await callback.message.answer(f"Помилка: {e}")
     await callback.answer()
 
-# --- КНОПКА КАЛЬКУЛЯТОРА (З ДЕТАЛІЗАЦІЄЮ) ---
+# --- КНОПКА КАЛЬКУЛЯТОРА ---
 @dp.callback_query(F.data.startswith("calc_"))
 async def run_calculation(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
@@ -349,7 +374,6 @@ async def run_calculation(callback: CallbackQuery):
         b = calculate_budget(data_json)
         c = b["costs"]
         
-        # Витягуємо клієнтські дані для деталізації
         client_info = data_json.get("client", {})
         measurements = data_json.get("answers", {}).get("measurements", {})
         
@@ -357,9 +381,8 @@ async def run_calculation(callback: CallbackQuery):
         floor = client_info.get("floor", 1)
         elevator = client_info.get("elevator", "Немає")
         
-        # --- ФОРМУВАННЯ БЛОКУ "ДЕТАЛІЗАЦІЯ" ---
         details = f"📐 **ОБСЯГИ ТА ЗАМІРИ:**\n"
-        details += f"▪️ **Площа загальна:** {total_area} м² (Поверх {floor} | Ліфт: {elevator})\n"
+        details += f"▪️ **Площа загальна:** {total_area} м²\n"
         details += f"▪️ **Електроточки:** ~{b['sockets']} шт.\n"
         
         if measurements:
@@ -378,7 +401,6 @@ async def run_calculation(callback: CallbackQuery):
                 else:
                     details += f"  - {n_name}: підлога {f_sq} м² | стіни {w_sq} м²\n"
         
-        # --- ФОРМУВАННЯ БЛОКУ "ФІНАНСИ" ---
         text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n"
         text += f"💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
         
@@ -410,6 +432,8 @@ async def run_calculation(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
+    if callback.from_user.id not in authorized_admins: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     try:
