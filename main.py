@@ -89,12 +89,11 @@ def get_cached_report(row_id):
 # --- КАЛЬКУЛЯТОР ВАРТОСТІ ---
 def calculate_budget(data_json):
     costs = {
-        "rough": [0, 0, 0],      # Чорнові роботи
-        "electric": [0, 0, 0],   # Електрика
-        "doors": [0, 0, 0],      # Двері
-        "rooms": [0, 0, 0],      # Оздоблення
-        "baths": [0, 0, 0],      # Санвузли
-        "logistics": [0, 0, 0]   # Логістика
+        "rough": [0, 0, 0],      
+        "electric": [0, 0, 0],   
+        "doors": [0, 0, 0],      
+        "rooms": [0, 0, 0],      
+        "baths": [0, 0, 0]       
     }
     
     client = data_json.get("client", {})
@@ -109,21 +108,13 @@ def calculate_budget(data_json):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
 
-    # 1. ЛОГІСТИКА (Занесення, Вивіз сміття)
-    logistics_work = total_area * 150
-    if elevator == "Немає" and floor > 1:
-        logistics_work += (total_area * 30 * floor)
-    elif elevator == "Пасажирський":
-        logistics_work += (total_area * 10 * floor)
-    costs["logistics"][0] += logistics_work
-
-    # 2. ЧОРНОВІ РОБОТИ
+    # 1. ЧОРНОВІ РОБОТИ
     if answers.get("screed_done") == "Ні":
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
     if answers.get("plumbing_done") == "Ні":
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
 
-    # 3. ЕЛЕКТРИКА
+    # 2. ЕЛЕКТРИКА
     sockets = 0
     if answers.get('kitchen_needed') != 'Ні': sockets += 10
     if answers.get('hallway_needed') != 'Ні': sockets += 4
@@ -141,7 +132,7 @@ def calculate_budget(data_json):
         costs["electric"][0] += total_area * 2100; costs["electric"][1] += total_area * 1100; costs["electric"][2] += total_area * 1100
     costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
 
-    # 4. ДВЕРІ
+    # 3. ДВЕРІ
     if answers.get("entrance_door") == "Так":
         costs["doors"][0] += 5000; costs["doors"][1] += 15000; costs["doors"][2] += 50000
         
@@ -152,7 +143,7 @@ def calculate_budget(data_json):
     elif "Стандарт" in int_door:
         costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
 
-    # 5. ПОКРИТТЯ ПО КІМНАТАХ ТА САНВУЗЛАХ
+    # 4. ПОКРИТТЯ ПО КІМНАТАХ ТА САНВУЗЛАХ
     for zone_id in measurements.keys():
         floor_sq = get_sq(zone_id, "floor")
         wall_sq = get_sq(zone_id, "walls")
@@ -201,7 +192,7 @@ def calculate_budget(data_json):
                 elif "Тіньовий" in base_t or "Прихований" in base_t:
                     costs["rooms"][0] += perimeter * 1600; costs["rooms"][1] += perimeter * 400; costs["rooms"][2] += perimeter * 800
 
-    # 6. СТЕЛЯ
+    # 5. СТЕЛЯ
     ceil_t = answers.get("ceiling", "")
     if "Натяжна" in ceil_t:
         costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
@@ -298,7 +289,7 @@ async def show_saved_report(callback: CallbackQuery):
     else:
         await callback.answer("Звіт не знайдено.", show_alert=True)
 
-# --- ГЕНЕРАЦІЯ ЗВІТУ (БЕЗ ПОМИЛОК) ---
+# --- ГЕНЕРАЦІЯ ЗВІТУ (БЕЗ ПОМИЛОК ТА HTML БАГІВ) ---
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
@@ -310,14 +301,18 @@ async def generate_report_action(callback: CallbackQuery):
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
+            # Оновлений промпт, який забороняє використовувати <br> та списки
             prompt = (
                 f"Ти професійний виконроб. Створи структуроване технічне завдання (звіт) по об'єкту на основі цих даних. "
-                f"Без цін і порад, тільки факти. ВАЖЛИВО: Використовуй ТІЛЬКИ HTML-теги для форматування "
-                f"(<b>жирний</b>, <i>курсив</i>, <ul><li>списки</li></ul>, <br> для нових рядків). "
-                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати символи Markdown (*, _, #, `).\n\nДані: {raw_answers}"
+                f"Без цін і порад, тільки факти. "
+                f"ВАЖЛИВО: Для форматування використовуй ТІЛЬКИ теги <b>жирний текст</b> та <i>курсив</i>. "
+                f"Для нових рядків використовуй звичайний перенос (Enter), для списків звичайне тире (-). "
+                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати теги <br>, <ul>, <li>, а також символи Markdown (*, _, #, `).\n\nДані: {raw_answers}"
             )
             response = model.generate_content(prompt)
-            report_text = response.text.replace("```html", "").replace("```", "").strip()
+            
+            # Додаткова "чистка" результату про всяк випадок, якщо ШІ щось "забув"
+            report_text = response.text.replace("```html", "").replace("```", "").replace("<br>", "\n").replace("<br/>", "\n").replace("<ul>", "").replace("</ul>", "").replace("<li>", "- ").replace("</li>", "\n").strip()
             
             save_report_to_cell(row_id, report_text)
             
@@ -348,9 +343,6 @@ async def run_calculation(callback: CallbackQuery):
         c = b["costs"]
         
         text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n"
-        
-        if c["logistics"][0] > 0:
-            text += f"📦 **Логістика (Поверх {b['floor']} | Ліфт: {b['elevator']}):**\nРобота (занесення, вивіз сміття): {c['logistics'][0]:,.0f} грн\n\n"
         
         if c["rough"][0] > 0:
             text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
