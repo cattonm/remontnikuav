@@ -17,7 +17,6 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Імпортуємо наш модуль безпеки!
 from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, load_auth, save_auth, is_authorized
 
 # --- КОНФІГУРАЦІЯ ---
@@ -96,7 +95,8 @@ def calculate_budget(data_json):
         "electric": [0, 0, 0],   
         "doors": [0, 0, 0],      
         "rooms": [0, 0, 0],      
-        "baths": [0, 0, 0]       
+        "baths": [0, 0, 0],
+        "logistics": [0, 0, 0]
     }
     
     client = data_json.get("client", {})
@@ -104,6 +104,8 @@ def calculate_budget(data_json):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
+    floor = int(client.get("floor", 1) or 1)
+    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
@@ -169,7 +171,6 @@ def calculate_budget(data_json):
 
         # --- ЖИТЛОВІ ЗОНИ ---
         if not is_bath:
-            # Підлога
             f_type = answers.get(f"{prefix}_floor", "")
             if isinstance(f_type, dict): f_type = f_type.get("type", "")
             
@@ -229,7 +230,6 @@ def calculate_budget(data_json):
         "sockets": sockets
     }
 
-# --- КЛАВІАТУРИ МЕНЕДЖЕРА ---
 def get_orders_keyboard():
     sheet = get_google_sheet()
     if not sheet: return None
@@ -246,24 +246,50 @@ def get_orders_keyboard():
     builder.button(text="🔄 Оновити список", callback_data="show_list")
     return builder.as_markup()
 
+def get_main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [KeyboardButton(text="🔐 Кабінет менеджера")]
+        ], resize_keyboard=True
+    )
+
 # ==========================================
-# ОБРОБНИКИ З НОВИМ ЗАХИСТОМ
+# ОБРОБНИКИ (КОМАНДИ ТА КНОПКИ)
 # ==========================================
 
-# 1. Секретна панель супер-адміна (Захищена твоїм ID)
+# СТАРТ - Перевіряємо авторизацію одразу
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    if not is_authorized(message.from_user.id):
+        await message.answer(
+            f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
+            "🔒 Цей бот є закритим інструментом.\n"
+            "Будь ласка, введіть пароль доступу:", 
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True) # Ховаємо будь-які кнопки
+        )
+        return
+
+    await message.answer(
+        f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
+        "Головне меню відкрито. Оберіть дію нижче:", 
+        reply_markup=get_main_menu_keyboard(), 
+        parse_mode="Markdown"
+    )
+
+# Секретна панель супер-адміна
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
-    try: await message.delete() # Видаляємо команду з чату
+    try: await message.delete() 
     except: pass
     
-    # ПЕРЕВІРКА: Якщо це не твій ID, просто ігноруємо
     if message.from_user.id != MASTER_ADMIN_ID:
         return
 
     auth_data = load_auth()
     if not auth_data:
-        await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
-        return
+        return await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
 
     kb = InlineKeyboardBuilder()
     for uid, info in auth_data.items():
@@ -275,11 +301,10 @@ async def secret_admin_panel(message: Message):
     kb.adjust(1)
     await message.answer("🕵️‍♂️ **Секретна панель доступу:**\nНатисніть на людину, щоб забрати в неї доступ.", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-# 2. Видалення доступу (Тільки для тебе)
 @dp.callback_query(F.data.startswith("revoke_"))
 async def revoke_access(callback: CallbackQuery):
     if callback.from_user.id != MASTER_ADMIN_ID:
-        return await callback.answer("⛔️ Немає доступу до цієї дії.", show_alert=True)
+        return await callback.answer("⛔️ Немає доступу.", show_alert=True)
 
     target_uid = callback.data.split("_")[1]
     auth_data = load_auth()
@@ -287,11 +312,10 @@ async def revoke_access(callback: CallbackQuery):
     if target_uid in auth_data:
         del auth_data[target_uid]
         save_auth(auth_data)
-        await callback.answer("✅ Доступ успішно скасовано!", show_alert=True)
+        await callback.answer("✅ Доступ скасовано!", show_alert=True)
         
         if not auth_data:
-            await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
-            return
+            return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
             
         kb = InlineKeyboardBuilder()
         for uid, info in auth_data.items():
@@ -301,52 +325,76 @@ async def revoke_access(callback: CallbackQuery):
             kb.button(text=label, callback_data=f"revoke_{uid}")
         kb.adjust(1)
         await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
-    else:
-        await callback.answer("Цього користувача вже видалено.", show_alert=True)
 
-# 3. Ввід пароля звичайним менеджером (З ЛОГУВАННЯМ)
-@dp.message(F.text == ADMIN_PASSWORD)
-async def process_password(message: Message):
-    auth_data = load_auth()
-    uid = str(message.from_user.id)
-    
-    auth_data[uid] = {
-        "name": message.from_user.full_name,
-        "username": message.from_user.username or "немає_юзернейму"
-    }
-    save_auth(auth_data)
-    
-    try: await message.delete() 
-    except: pass
-    
-    await message.answer("✅ **Доступ дозволено!** Ваші дані збережено. Натисніть 'Кабінет менеджера'.", parse_mode="Markdown")
-    
-    # ВІДПРАВКА ЛОГУ ТОБІ (якщо це ввів не ти сам)
-    if message.from_user.id != MASTER_ADMIN_ID:
-        log_text = (
-            f"⚠️ **АВТОРИЗАЦІЯ В БОТІ** ⚠️\n\n"
-            f"👤 **Ім'я:** {message.from_user.full_name}\n"
-            f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
-            f"🆔 **ID:** `{message.from_user.id}`"
-        )
-        try:
-            await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Не вдалося відправити лог Мастер-адміну: {e}")
-
-# 4. Перевірка доступу при вході в Кабінет
+# КАБІНЕТ МЕНЕДЖЕРА
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
     if not is_authorized(message.from_user.id):
-        await message.answer("⛔️ **Доступ заборонено.**\nБудь ласка, введіть пароль у цей чат для доступу до бази.", parse_mode="Markdown")
-        return
+        return await message.answer("⛔️ **Доступ заборонено.**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
 
     kb = get_orders_keyboard()
     if kb: await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else: await message.answer("📭 Список заявок порожній.")
 
-# Всі інші кнопки захищені функцією is_authorized
+# ==========================================
+# ПЕРЕХОПЛЕННЯ ТЕКСТУ (ЛОГІКА ПАРОЛІВ ТА ЛОГІВ)
+# ==========================================
+@dp.message(F.text)
+async def process_password_attempts(message: Message):
+    user_id = message.from_user.id
+    
+    # Якщо людина вже має доступ - просто ігноруємо випадковий текст
+    if is_authorized(user_id):
+        return
+        
+    # Людина БЕЗ доступу ввела правильний пароль
+    if message.text == ADMIN_PASSWORD:
+        auth_data = load_auth()
+        auth_data[str(user_id)] = {
+            "name": message.from_user.full_name,
+            "username": message.from_user.username or "немає_юзернейму"
+        }
+        save_auth(auth_data)
+        
+        try: await message.delete() 
+        except: pass
+        
+        await message.answer("✅ **Доступ дозволено!** Ваші дані збережено. Головне меню відкрито.", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        
+        # Лог УСПІХУ (надсилаємо тобі, якщо зайшов хтось інший)
+        if user_id != MASTER_ADMIN_ID:
+            log_text = (
+                f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n"
+                f"👤 **Ім'я:** {message.from_user.full_name}\n"
+                f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
+                f"🆔 **ID:** `{user_id}`"
+            )
+            try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
+            except: pass
+
+    # Людина БЕЗ доступу ввела НЕПРАВИЛЬНИЙ пароль
+    else:
+        try: await message.delete() 
+        except: pass
+        
+        await message.answer("⛔️ **Невірний пароль.** Доступ заборонено.", parse_mode="Markdown")
+        
+        # Лог НЕВДАЧІ (надсилаємо тобі завжди)
+        log_text = (
+            f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n"
+            f"👤 **Ім'я:** {message.from_user.full_name}\n"
+            f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
+            f"🆔 **ID:** `{user_id}`\n"
+            f"🔑 **Введений текст:** `{message.text}`"
+        )
+        try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
+        except: pass
+
+
+# ==========================================
+# ОБРОБНИКИ КНОПОК ЗАЯВОК
+# ==========================================
 @dp.callback_query(F.data == "show_list")
 async def refresh_list(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
@@ -532,22 +580,10 @@ async def delete_order(callback: CallbackQuery):
     except Exception as e:
         await callback.answer(f"Помилка: {e}", show_alert=True)
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))],
-            [KeyboardButton(text="🔐 Кабінет менеджера")]
-        ], resize_keyboard=True
-    )
-    await message.answer(
-        f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
-        "Я допоможу сформувати та визначити обсяг робіт.\n", 
-        reply_markup=kb, parse_mode="Markdown"
-    )
-
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
+    if not is_authorized(message.from_user.id): return await message.answer("⛔️ Доступ заборонено.")
+    
     data = json.loads(message.web_app_data.data)
     if save_to_sheet(data):
         await message.answer("✅ **Заявку прийнято!**", parse_mode="Markdown")
