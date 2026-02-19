@@ -17,6 +17,9 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# Імпортуємо наш модуль безпеки!
+from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, load_auth, save_auth, is_authorized
+
 # --- КОНФІГУРАЦІЯ ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -29,33 +32,16 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
-# --- БЕЗПЕКА ---
-ADMIN_PASSWORD = "IlOvErEmOnTUA26#A"
-AUTH_FILE = "auth_db.json"
-
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- GEMINI ---
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash-lite')
 else:
     model = None
-
-# --- ФУНКЦІЇ АВТОРИЗАЦІЇ ---
-def load_auth():
-    if os.path.exists(AUTH_FILE):
-        with open(AUTH_FILE, "r", encoding="utf-8") as f:
-            try: return json.load(f)
-            except: return {}
-    return {}
-
-def save_auth(data):
-    with open(AUTH_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
 
 # --- GOOGLE SHEETS ---
 def get_google_sheet():
@@ -110,8 +96,7 @@ def calculate_budget(data_json):
         "electric": [0, 0, 0],   
         "doors": [0, 0, 0],      
         "rooms": [0, 0, 0],      
-        "baths": [0, 0, 0],
-        "logistics": [0, 0, 0]
+        "baths": [0, 0, 0]       
     }
     
     client = data_json.get("client", {})
@@ -119,22 +104,12 @@ def calculate_budget(data_json):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
-    floor = int(client.get("floor", 1) or 1)
-    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
 
-    # 1. ЛОГІСТИКА
-    logistics_work = total_area * 150
-    if elevator == "Немає" and floor > 1:
-        logistics_work += (total_area * 30 * floor)
-    elif elevator == "Пасажирський":
-        logistics_work += (total_area * 10 * floor)
-    costs["logistics"][0] += logistics_work
-
-    # 2. ЧОРНОВІ РОБОТИ
+    # 1. ЧОРНОВІ РОБОТИ
     screed_ans = answers.get("screed_done", "")
     if "Мокра" in screed_ans:
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
@@ -144,7 +119,7 @@ def calculate_budget(data_json):
     if answers.get("plumbing_done") == "Ні":
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
 
-    # 3. ЕЛЕКТРИКА
+    # 2. ЕЛЕКТРИКА
     sockets = 0
     if answers.get('kitchen_needed') != 'Ні': sockets += 10
     if answers.get('hallway_needed') != 'Ні': sockets += 4
@@ -162,7 +137,7 @@ def calculate_budget(data_json):
         costs["electric"][0] += total_area * 1200; costs["electric"][1] += total_area * 800; costs["electric"][2] += total_area * 800
     costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
 
-    # 4. ДВЕРІ
+    # 3. ДВЕРІ
     if answers.get("entrance_door") == "Так":
         costs["doors"][0] += 5000; costs["doors"][1] += 15000; costs["doors"][2] += 50000
         
@@ -173,7 +148,7 @@ def calculate_budget(data_json):
     elif "Стандарт" in int_door:
         costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
 
-    # 5. ПОКРИТТЯ ТА ОЗДОБЛЕННЯ
+    # 4. ПОКРИТТЯ ТА ОЗДОБЛЕННЯ
     for zone_id in measurements.keys():
         floor_sq = get_sq(zone_id, "floor")
         wall_sq = get_sq(zone_id, "walls")
@@ -207,11 +182,11 @@ def calculate_budget(data_json):
             elif "Паркет" in f_type:
                 costs["rooms"][0] += floor_sq * 850; costs["rooms"][1] += floor_sq * 2500; costs["rooms"][2] += floor_sq * 5000
             
-            # Стіни та УКОСИ (35% від стін)
+            # Стіни та УКОСИ
             w_type = answers.get(f"{prefix}_walls", "")
             slopes_len = wall_sq * 0.35
-            
             w_work = 0; w_mat_min = 0; w_mat_max = 0
+            
             if "Шпалери" in w_type:
                 w_work = 1000; w_mat_min = 200; w_mat_max = 400
             elif "Фарбування" in w_type:
@@ -219,9 +194,7 @@ def calculate_budget(data_json):
             elif "Штукатурка" in w_type or "Декор" in w_type:
                 w_work = 2210; w_mat_min = 500; w_mat_max = 1500
             
-            # Додаємо ціну за самі стіни
             costs["rooms"][0] += wall_sq * w_work; costs["rooms"][1] += wall_sq * w_mat_min; costs["rooms"][2] += wall_sq * w_mat_max
-            # Додаємо ціну за укоси по тому ж тарифу, але за м.пог.
             costs["rooms"][0] += slopes_len * w_work; costs["rooms"][1] += slopes_len * w_mat_min; costs["rooms"][2] += slopes_len * w_mat_max
             
             # Плінтус та тіньовий шов стелі
@@ -229,7 +202,6 @@ def calculate_budget(data_json):
                 perimeter = math.sqrt(floor_sq) * 4
                 base_t = answers.get("baseboard", "")
                 
-                # Підлоговий плінтус
                 if "Стандартний" in base_t:
                     costs["rooms"][0] += perimeter * 215; costs["rooms"][1] += perimeter * 150; costs["rooms"][2] += perimeter * 150
                 elif "Тіньовий" in base_t:
@@ -237,11 +209,10 @@ def calculate_budget(data_json):
                 elif "Прихований" in base_t:
                     costs["rooms"][0] += perimeter * 1600; costs["rooms"][1] += perimeter * 600; costs["rooms"][2] += perimeter * 600
                 
-                # Стельовий тіньовий шов (якщо обрано)
                 if answers.get("ceiling_shadow") == "Так":
-                    costs["rooms"][0] += perimeter * 500 # Сумарно робота+матеріал записуємо в роботу для простоти
+                    costs["rooms"][0] += perimeter * 500 
 
-    # 6. СТЕЛЯ БАЗОВА
+    # 5. СТЕЛЯ БАЗОВА
     ceil_t = answers.get("ceiling", "")
     if "Натяжна" in ceil_t:
         costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
@@ -255,9 +226,8 @@ def calculate_budget(data_json):
     return {
         "costs": costs, "total_work": round(total_work),
         "total_mat_min": round(total_mat_min), "total_mat_max": round(total_mat_max),
-        "sockets": sockets, "floor": floor, "elevator": elevator
+        "sockets": sockets
     }
-
 
 # --- КЛАВІАТУРИ МЕНЕДЖЕРА ---
 def get_orders_keyboard():
@@ -277,15 +247,19 @@ def get_orders_keyboard():
     return builder.as_markup()
 
 # ==========================================
-# ОБРОБНИКИ (З БЕЗПЕКОЮ ТА СЕКРЕТАМИ)
+# ОБРОБНИКИ З НОВИМ ЗАХИСТОМ
 # ==========================================
 
-# 1. Секретна панель супер-адміна
+# 1. Секретна панель супер-адміна (Захищена твоїм ID)
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
-    try: await message.delete() # Ховаємо команду
+    try: await message.delete() # Видаляємо команду з чату
     except: pass
     
+    # ПЕРЕВІРКА: Якщо це не твій ID, просто ігноруємо
+    if message.from_user.id != MASTER_ADMIN_ID:
+        return
+
     auth_data = load_auth()
     if not auth_data:
         await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
@@ -299,11 +273,14 @@ async def secret_admin_panel(message: Message):
         kb.button(text=label, callback_data=f"revoke_{uid}")
     
     kb.adjust(1)
-    await message.answer("🕵️‍♂️ **Секретна панель керування доступами:**\nНатисніть на людину, щоб забрати в неї доступ.", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await message.answer("🕵️‍♂️ **Секретна панель доступу:**\nНатисніть на людину, щоб забрати в неї доступ.", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-# 2. Видалення користувача з бази
+# 2. Видалення доступу (Тільки для тебе)
 @dp.callback_query(F.data.startswith("revoke_"))
 async def revoke_access(callback: CallbackQuery):
+    if callback.from_user.id != MASTER_ADMIN_ID:
+        return await callback.answer("⛔️ Немає доступу до цієї дії.", show_alert=True)
+
     target_uid = callback.data.split("_")[1]
     auth_data = load_auth()
     
@@ -312,9 +289,8 @@ async def revoke_access(callback: CallbackQuery):
         save_auth(auth_data)
         await callback.answer("✅ Доступ успішно скасовано!", show_alert=True)
         
-        # Оновлюємо клавіатуру
         if not auth_data:
-            await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено.")
+            await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
             return
             
         kb = InlineKeyboardBuilder()
@@ -328,7 +304,7 @@ async def revoke_access(callback: CallbackQuery):
     else:
         await callback.answer("Цього користувача вже видалено.", show_alert=True)
 
-# 3. Ввід пароля звичайним менеджером
+# 3. Ввід пароля звичайним менеджером (З ЛОГУВАННЯМ)
 @dp.message(F.text == ADMIN_PASSWORD)
 async def process_password(message: Message):
     auth_data = load_auth()
@@ -340,17 +316,29 @@ async def process_password(message: Message):
     }
     save_auth(auth_data)
     
-    try: await message.delete() # Захист: видаляємо пароль з чату
+    try: await message.delete() 
     except: pass
     
-    await message.answer("✅ **Доступ дозволено!** Ваші дані збережено. Тепер ви можете вільно використовувати Кабінет менеджера.", parse_mode="Markdown")
+    await message.answer("✅ **Доступ дозволено!** Ваші дані збережено. Натисніть 'Кабінет менеджера'.", parse_mode="Markdown")
+    
+    # ВІДПРАВКА ЛОГУ ТОБІ (якщо це ввів не ти сам)
+    if message.from_user.id != MASTER_ADMIN_ID:
+        log_text = (
+            f"⚠️ **АВТОРИЗАЦІЯ В БОТІ** ⚠️\n\n"
+            f"👤 **Ім'я:** {message.from_user.full_name}\n"
+            f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
+            f"🆔 **ID:** `{message.from_user.id}`"
+        )
+        try:
+            await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Не вдалося відправити лог Мастер-адміну: {e}")
 
-# 4. Перевірка доступу при вході
+# 4. Перевірка доступу при вході в Кабінет
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
-    auth_data = load_auth()
-    if str(message.from_user.id) not in auth_data:
+    if not is_authorized(message.from_user.id):
         await message.answer("⛔️ **Доступ заборонено.**\nБудь ласка, введіть пароль у цей чат для доступу до бази.", parse_mode="Markdown")
         return
 
@@ -358,19 +346,17 @@ async def open_admin_panel(message: Message):
     if kb: await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else: await message.answer("📭 Список заявок порожній.")
 
+# Всі інші кнопки захищені функцією is_authorized
 @dp.callback_query(F.data == "show_list")
 async def refresh_list(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
-    
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     kb = get_orders_keyboard()
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
@@ -406,8 +392,7 @@ async def view_order(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("showrep_"))
 async def show_saved_report(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
     report = get_cached_report(row_id)
@@ -422,8 +407,7 @@ async def show_saved_report(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
@@ -464,8 +448,7 @@ async def generate_report_action(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("calc_"))
 async def run_calculation(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
@@ -488,7 +471,7 @@ async def run_calculation(callback: CallbackQuery):
         elevator = client_info.get("elevator", "Немає")
         
         details = f"📐 **ОБСЯГИ ТА ЗАМІРИ:**\n"
-        details += f"▪️ **Площа загальна:** {total_area} м²\n"
+        details += f"▪️ **Площа загальна:** {total_area} м² (Поверх: {floor} | Ліфт: {elevator})\n"
         details += f"▪️ **Електроточки:** ~{b['sockets']} шт.\n"
         
         if measurements:
@@ -509,9 +492,6 @@ async def run_calculation(callback: CallbackQuery):
         
         text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n"
         text += f"💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
-        
-        if c["logistics"][0] > 0:
-            text += f"📦 **Логістика (Поверх {floor} | Ліфт: {elevator}):**\nРобота: {c['logistics'][0]:,.0f} грн\n\n"
             
         if c["rough"][0] > 0:
             text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
@@ -541,8 +521,7 @@ async def run_calculation(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
-    auth_data = load_auth()
-    if str(callback.from_user.id) not in auth_data: return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
