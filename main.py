@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import sys
+import math
 from datetime import datetime
 import asyncio
 
@@ -51,43 +52,174 @@ def get_google_sheet():
         logging.error(f"Google Sheet Error: {e}")
         return None
 
-# --- ЗБЕРЕЖЕННЯ ЗАЯВКИ ---
 def save_to_sheet(data):
     sheet = get_google_sheet()
     if not sheet: return False
     try:
         c = data.get('client', {})
-        answers = json.dumps(data.get('answers', {}), ensure_ascii=False)
+        answers = json.dumps(data, ensure_ascii=False)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        # Колонки: Дата | Ім'я | Телефон | Тип | Адреса | JSON | ЗВІТ (пусто)
-        row = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), c.get('address'), answers, ""]
+        
+        area = c.get('area', '0')
+        address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
+        
+        row = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, ""]
         sheet.append_row(row)
         return True
     except Exception as e:
         logging.error(f"Save Error: {e}")
         return False
 
-# --- ЗБЕРЕЖЕННЯ ЗВІТУ В ТАБЛИЦЮ ---
 def save_report_to_cell(row_id, report_text):
     sheet = get_google_sheet()
     if not sheet: return
     try:
-        # Оновлюємо 7-му колонку (G) у відповідному рядку
         sheet.update_cell(row_id, 7, report_text)
     except Exception as e:
         logging.error(f"Report Save Error: {e}")
 
-# --- ОТРИМАННЯ ЗВІТУ З ТАБЛИЦІ ---
 def get_cached_report(row_id):
     sheet = get_google_sheet()
     if not sheet: return None
     try:
-        # Беремо значення з 7-ї колонки
         return sheet.cell(row_id, 7).value
     except:
         return None
 
-# --- КЛАВІАТУРИ ---
+# --- КАЛЬКУЛЯТОР ВАРТОСТІ ---
+def calculate_budget(data_json):
+    costs = {
+        "rough": [0, 0, 0],      # Чорнові роботи
+        "electric": [0, 0, 0],   # Електрика
+        "doors": [0, 0, 0],      # Двері
+        "rooms": [0, 0, 0],      # Оздоблення
+        "baths": [0, 0, 0],      # Санвузли
+        "logistics": [0, 0, 0]   # Логістика
+    }
+    
+    client = data_json.get("client", {})
+    answers = data_json.get("answers", {})
+    measurements = answers.get("measurements", {})
+    
+    total_area = float(client.get("area", 0) or 0)
+    floor = int(client.get("floor", 1) or 1)
+    elevator = client.get("elevator", "Немає")
+    
+    def get_sq(zone_id, key):
+        try: return float(measurements.get(zone_id, {}).get(key, 0))
+        except: return 0.0
+
+    # 1. ЛОГІСТИКА (Занесення, Вивіз сміття)
+    logistics_work = total_area * 150
+    if elevator == "Немає" and floor > 1:
+        logistics_work += (total_area * 30 * floor)
+    elif elevator == "Пасажирський":
+        logistics_work += (total_area * 10 * floor)
+    costs["logistics"][0] += logistics_work
+
+    # 2. ЧОРНОВІ РОБОТИ
+    if answers.get("screed_done") == "Ні":
+        costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
+    if answers.get("plumbing_done") == "Ні":
+        costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
+
+    # 3. ЕЛЕКТРИКА
+    sockets = 0
+    if answers.get('kitchen_needed') != 'Ні': sockets += 10
+    if answers.get('hallway_needed') != 'Ні': sockets += 4
+    sockets += int(answers.get('rooms_count', 0)) * 8
+    sockets += int(answers.get('baths_count', 0)) * 4
+    
+    warm_floors = answers.get('warm_floor', [])
+    sockets += len([w for w in warm_floors if w != 'Не потребується'])
+    
+    k_other = answers.get("kitchen_other", {})
+    for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Підсвітка робочої поверхні"]:
+        if tech in k_other: sockets += 1
+
+    if answers.get("electricity_done") == "Ні":
+        costs["electric"][0] += total_area * 2100; costs["electric"][1] += total_area * 1100; costs["electric"][2] += total_area * 1100
+    costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
+
+    # 4. ДВЕРІ
+    if answers.get("entrance_door") == "Так":
+        costs["doors"][0] += 5000; costs["doors"][1] += 15000; costs["doors"][2] += 50000
+        
+    int_door = answers.get("interior_door", "")
+    doors_count = int(answers.get('rooms_count', 0)) + int(answers.get('baths_count', 0))
+    if "Прихований" in int_door:
+        costs["doors"][0] += doors_count * 30000; costs["doors"][1] += doors_count * 15000; costs["doors"][2] += doors_count * 27000
+    elif "Стандарт" in int_door:
+        costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
+
+    # 5. ПОКРИТТЯ ПО КІМНАТАХ ТА САНВУЗЛАХ
+    for zone_id in measurements.keys():
+        floor_sq = get_sq(zone_id, "floor")
+        wall_sq = get_sq(zone_id, "walls")
+        prefix = zone_id.split('_')[0] if "room" not in zone_id and "bath" not in zone_id else zone_id
+        is_bath = "bath" in prefix
+        
+        # --- САНВУЗОЛ СПЕЦИФІКА ---
+        if is_bath:
+            tile_sq = floor_sq * 4.5
+            costs["baths"][0] += tile_sq * 3000
+            costs["baths"][1] += tile_sq * 1800; costs["baths"][2] += tile_sq * 1800
+            
+            if answers.get(f"{prefix}_toilet", {}).get("type") == "Інсталяція":
+                costs["baths"][0] += 4900; costs["baths"][1] += 12000; costs["baths"][2] += 30000
+            tub_type = answers.get(f"{prefix}_tub", {}).get("type", "")
+            if "Акрил" in tub_type or "Окремостояча" in tub_type:
+                costs["baths"][0] += 3800; costs["baths"][1] += 15000; costs["baths"][2] += 80000
+
+        # --- ЖИТЛОВІ ЗОНИ ---
+        if not is_bath:
+            f_type = answers.get(f"{prefix}_floor", "")
+            if isinstance(f_type, dict): f_type = f_type.get("type", "")
+            
+            if "Ламінат" in f_type:
+                costs["rooms"][0] += floor_sq * 405; costs["rooms"][1] += floor_sq * 600; costs["rooms"][2] += floor_sq * 900
+            elif "Кварц" in f_type:
+                costs["rooms"][0] += floor_sq * 565; costs["rooms"][1] += floor_sq * 1200; costs["rooms"][2] += floor_sq * 1800
+            elif "Керамограніт" in f_type or "Плитка" in f_type:
+                costs["rooms"][0] += floor_sq * 715; costs["rooms"][1] += floor_sq * 1500; costs["rooms"][2] += floor_sq * 2500
+            elif "Паркет" in f_type:
+                costs["rooms"][0] += floor_sq * 850; costs["rooms"][1] += floor_sq * 2500; costs["rooms"][2] += floor_sq * 5000
+            
+            w_type = answers.get(f"{prefix}_walls", "")
+            if "Шпалери" in w_type:
+                costs["rooms"][0] += wall_sq * 1000; costs["rooms"][1] += wall_sq * 200; costs["rooms"][2] += wall_sq * 400
+            elif "Фарбування" in w_type:
+                costs["rooms"][0] += wall_sq * 1865; costs["rooms"][1] += wall_sq * 250; costs["rooms"][2] += wall_sq * 450
+            elif "Штукатурка" in w_type or "Декор" in w_type:
+                costs["rooms"][0] += wall_sq * 2210; costs["rooms"][1] += wall_sq * 500; costs["rooms"][2] += wall_sq * 1500
+            
+            if floor_sq > 0:
+                perimeter = math.sqrt(floor_sq) * 4
+                base_t = answers.get("baseboard", "")
+                if "Стандартний" in base_t:
+                    costs["rooms"][0] += perimeter * 215; costs["rooms"][1] += perimeter * 115; costs["rooms"][2] += perimeter * 200
+                elif "Тіньовий" in base_t or "Прихований" in base_t:
+                    costs["rooms"][0] += perimeter * 1600; costs["rooms"][1] += perimeter * 400; costs["rooms"][2] += perimeter * 800
+
+    # 6. СТЕЛЯ
+    ceil_t = answers.get("ceiling", "")
+    if "Натяжна" in ceil_t:
+        costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
+    elif "Гіпсокартон" in ceil_t:
+        costs["rooms"][0] += total_area * 700; costs["rooms"][1] += total_area * 440; costs["rooms"][2] += total_area * 440
+
+    total_work = sum(c[0] for c in costs.values())
+    total_mat_min = sum(c[1] for c in costs.values())
+    total_mat_max = sum(c[2] for c in costs.values())
+
+    return {
+        "costs": costs, "total_work": round(total_work),
+        "total_mat_min": round(total_mat_min), "total_mat_max": round(total_mat_max),
+        "sockets": sockets, "floor": floor, "elevator": elevator
+    }
+
+
+# --- КЛАВІАТУРИ МЕНЕДЖЕРА ---
 def get_orders_keyboard():
     sheet = get_google_sheet()
     if not sheet: return None
@@ -104,8 +236,6 @@ def get_orders_keyboard():
     builder.button(text="🔄 Оновити список", callback_data="show_list")
     return builder.as_markup()
 
-# --- ЛОГІКА МЕНЕДЖЕРА ---
-
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
@@ -121,15 +251,11 @@ async def refresh_list(callback: CallbackQuery):
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
-# --- ПЕРЕГЛЯД КАРТКИ (З ПЕРЕВІРКОЮ НАЯВНОСТІ ЗВІТУ) ---
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
-    
-    if not sheet:
-        await callback.message.answer("⚠️ Помилка таблиці.")
-        return
+    if not sheet: return
 
     try:
         row_data = sheet.row_values(row_id)
@@ -137,96 +263,121 @@ async def view_order(callback: CallbackQuery):
         phone = row_data[2] if len(row_data) > 2 else "-"
         obj_type = row_data[3] if len(row_data) > 3 else "-"
         address = row_data[4] if len(row_data) > 4 else "-"
-        
-        # Перевіряємо, чи є вже звіт у 7-й колонці (індекс 6 у списку)
         existing_report = row_data[6] if len(row_data) > 6 else ""
 
         text = (
-            f"👤 **Клієнт:** {name}\n"
-            f"📞 **Телефон:** `{phone}`\n"
-            f"🏠 **Об'єкт:** {obj_type}\n"
-            f"📍 **Адреса:** {address}"
+            f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n"
+            f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса:** {address}"
         )
 
         kb = InlineKeyboardBuilder()
-        
-        # ЛОГІКА КНОПКИ ЗВІТУ
         if existing_report and len(existing_report) > 10:
-            # Якщо звіт вже є - кнопка "Відкрити"
-            kb.button(text="📂 Відкрити збережений звіт", callback_data=f"showrep_{row_id}")
+            kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
         else:
-            # Якщо звіту немає - кнопка "Згенерувати"
-            kb.button(text="✨ Згенерувати ТЗ (AI)", callback_data=f"gen_{row_id}")
+            kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
             
-        kb.button(text="💰 Розрахунок", callback_data=f"calc_{row_id}")
+        kb.button(text="💰 Прорахувати кошторис", callback_data=f"calc_{row_id}")
         kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
         kb.button(text="🔙 Назад", callback_data="show_list")
         kb.adjust(1) 
 
         await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-    except Exception as e:
+    except:
         await callback.message.answer("Помилка даних заявки.")
 
-# --- ПОКАЗ ВЖЕ ЗБЕРЕЖЕНОГО ЗВІТУ ---
 @dp.callback_query(F.data.startswith("showrep_"))
 async def show_saved_report(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
-    
     report = get_cached_report(row_id)
     if report:
-        # Додаємо кнопку "Оновити", якщо раптом треба перегенерувати
         kb = InlineKeyboardBuilder()
-        kb.button(text="🔄 Перегенерувати (AI)", callback_data=f"gen_{row_id}")
+        kb.button(text="🔄 Перегенерувати", callback_data=f"gen_{row_id}")
         kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
         kb.adjust(1)
-        
-        await callback.message.edit_text(f"📋 **ЗБЕРЕЖЕНИЙ ЗВІТ:**\n\n{report}", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        await callback.message.edit_text(f"📋 <b>ЗБЕРЕЖЕНИЙ ЗВІТ:</b>\n\n{report}", reply_markup=kb.as_markup(), parse_mode="HTML")
     else:
-        await callback.answer("Помилка: Звіт не знайдено.", show_alert=True)
+        await callback.answer("Звіт не знайдено.", show_alert=True)
 
-# --- ГЕНЕРАЦІЯ ЗВІТУ + ЗБЕРЕЖЕННЯ ---
+# --- ГЕНЕРАЦІЯ ЗВІТУ (БЕЗ ПОМИЛОК) ---
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
-    await callback.message.answer("⏳ **AI аналізує та зберігає звіт...**")
-    
+    await callback.message.answer("⏳ **Генеруємо технічне завдання...**")
     try:
         row_data = sheet.row_values(row_id)
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
-            prompt = f"""
-            Ти професійний будівельний кошторисник.
-            Створи "Паспорт Об'єкта" для майстрів.
-            СТИЛЬ:
-            - Жирний шрифт для ключів.
-            - Емодзі для розділів.
-            - Жодних порад чи вступу. Тільки факти.
-            ВХІДНІ ДАНІ: {raw_answers}
-            """
+            prompt = (
+                f"Ти професійний виконроб. Створи структуроване технічне завдання (звіт) по об'єкту на основі цих даних. "
+                f"Без цін і порад, тільки факти. ВАЖЛИВО: Використовуй ТІЛЬКИ HTML-теги для форматування "
+                f"(<b>жирний</b>, <i>курсив</i>, <ul><li>списки</li></ul>, <br> для нових рядків). "
+                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати символи Markdown (*, _, #, `).\n\nДані: {raw_answers}"
+            )
             response = model.generate_content(prompt)
-            report_text = response.text
+            report_text = response.text.replace("```html", "").replace("```", "").strip()
             
-            # 1. ЗБЕРІГАЄМО В ТАБЛИЦЮ
             save_report_to_cell(row_id, report_text)
             
-            # 2. ПОКАЗУЄМО
             kb = InlineKeyboardBuilder()
             kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
             
-            await callback.message.answer(f"📋 **ПАСПОРТ ОБ'ЄКТА (Збережено)**\n\n{report_text}", reply_markup=kb.as_markup(), parse_mode="Markdown")
+            await callback.message.answer(f"📋 <b>ПАСПОРТ ОБ'ЄКТА</b>\n\n{report_text}", reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
-            await callback.message.answer("⚠️ AI модуль не підключено.")
-            
+            await callback.message.answer("⚠️ AI не підключено.")
     except Exception as e:
         await callback.message.answer(f"Помилка: {e}")
-    
     await callback.answer()
 
-# --- ВИДАЛЕННЯ ---
+# --- КНОПКА КАЛЬКУЛЯТОРА ---
+@dp.callback_query(F.data.startswith("calc_"))
+async def run_calculation(callback: CallbackQuery):
+    row_id = int(callback.data.split("_")[1])
+    sheet = get_google_sheet()
+    
+    await callback.answer("Рахуємо гроші... ⏳")
+    
+    try:
+        row_data = sheet.row_values(row_id)
+        raw_data = row_data[5] if len(row_data) > 5 else "{}"
+        data_json = json.loads(raw_data)
+        
+        b = calculate_budget(data_json)
+        c = b["costs"]
+        
+        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n"
+        
+        if c["logistics"][0] > 0:
+            text += f"📦 **Логістика (Поверх {b['floor']} | Ліфт: {b['elevator']}):**\nРобота (занесення, вивіз сміття): {c['logistics'][0]:,.0f} грн\n\n"
+        
+        if c["rough"][0] > 0:
+            text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
+        
+        text += f"⚡️ **Електрика (~{b['sockets']} точок + розводка):**\nРобота: {c['electric'][0]:,.0f} грн | Матеріали: ~{c['electric'][1]:,.0f} грн\n\n"
+        
+        if c["doors"][0] > 0:
+            text += f"🚪 **Двері (Вхідні + Міжкімнатні):**\nРобота: {c['doors'][0]:,.0f} грн | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} грн\n\n"
+            
+        text += f"🛋 **Оздоблення кімнат (Підлога, Стіни, Стеля, Плінтус):**\nРобота: {c['rooms'][0]:,.0f} грн | Матеріали: {c['rooms'][1]:,.0f} - {c['rooms'][2]:,.0f} грн\n\n"
+        
+        if c["baths"][0] > 0:
+            text += f"🛁 **Санвузли (Плитка, Сантехніка):**\nРобота: {c['baths'][0]:,.0f} грн | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} грн\n\n"
+            
+        text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n"
+        text += f"🛠 **Робота:** ~{b['total_work']:,.0f} грн\n"
+        text += f"📦 **Матеріали:** від {b['total_mat_min']:,.0f} грн до {b['total_mat_max']:,.0f} грн\n"
+        text += f"💵 **Всього:** від **{(b['total_work'] + b['total_mat_min']):,.0f} грн** до **{(b['total_work'] + b['total_mat_max']):,.0f} грн**"
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
+        
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        
+    except Exception as e:
+        await callback.message.answer(f"Помилка розрахунку: {e}")
+
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
@@ -238,12 +389,6 @@ async def delete_order(callback: CallbackQuery):
     except Exception as e:
         await callback.answer(f"Помилка: {e}", show_alert=True)
 
-# --- ЗАГЛУШКА ПРОРАХУНКУ ---
-@dp.callback_query(F.data.startswith("calc_"))
-async def calc_stub(callback: CallbackQuery):
-    await callback.answer("Скоро тут будуть цифри 💵", show_alert=True)
-
-# --- СТАРТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     kb = ReplyKeyboardMarkup(
@@ -254,17 +399,15 @@ async def cmd_start(message: Message):
     )
     await message.answer(
         f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
-        "Я допоможу сформувати кошторис та визначити обсяг робіт.\n"
-        "Натисніть **'Заповнити анкету'**, щоб почати.", 
+        "Я допоможу сформувати та визначити обсяг робіт.\n", 
         reply_markup=kb, parse_mode="Markdown"
     )
 
-# --- ВЕБХУК ---
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     data = json.loads(message.web_app_data.data)
     if save_to_sheet(data):
-        await message.answer("✅ **Заявку прийнято!** Очікуйте дзвінка.", parse_mode="Markdown")
+        await message.answer("✅ **Заявку прийнято!**", parse_mode="Markdown")
     else:
         await message.answer("⚠️ Помилка. Спробуйте ще раз.")
 

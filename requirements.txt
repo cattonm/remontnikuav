@@ -1,11 +1,10 @@
 aiogram
 aiohttp
-google-generativeai
 gspread
 oauth2client
 python-dotenv
 uvicorn
 fastapi
-google-generativeai
 gspread
 oauth2client
+google.generativeai
