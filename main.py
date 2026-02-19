@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 import math
+import re
 from datetime import datetime
 import asyncio
 
@@ -101,8 +102,6 @@ def calculate_budget(data_json):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
-    floor = int(client.get("floor", 1) or 1)
-    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
@@ -206,7 +205,7 @@ def calculate_budget(data_json):
     return {
         "costs": costs, "total_work": round(total_work),
         "total_mat_min": round(total_mat_min), "total_mat_max": round(total_mat_max),
-        "sockets": sockets, "floor": floor, "elevator": elevator
+        "sockets": sockets
     }
 
 
@@ -289,7 +288,7 @@ async def show_saved_report(callback: CallbackQuery):
     else:
         await callback.answer("Звіт не знайдено.", show_alert=True)
 
-# --- ГЕНЕРАЦІЯ ЗВІТУ (БЕЗ ПОМИЛОК ТА HTML БАГІВ) ---
+# --- ГЕНЕРАЦІЯ ЗВІТУ (АБСОЛЮТНО БЕЗПЕЧНИЙ HTML) ---
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
@@ -301,18 +300,26 @@ async def generate_report_action(callback: CallbackQuery):
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
-            # Оновлений промпт, який забороняє використовувати <br> та списки
+            # Новий жорсткий промпт, який забороняє вигадувати назви кімнат і ламати теги
             prompt = (
-                f"Ти професійний виконроб. Створи структуроване технічне завдання (звіт) по об'єкту на основі цих даних. "
-                f"Без цін і порад, тільки факти. "
-                f"ВАЖЛИВО: Для форматування використовуй ТІЛЬКИ теги <b>жирний текст</b> та <i>курсив</i>. "
-                f"Для нових рядків використовуй звичайний перенос (Enter), для списків звичайне тире (-). "
-                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати теги <br>, <ul>, <li>, а також символи Markdown (*, _, #, `).\n\nДані: {raw_answers}"
+                f"Ти професійний виконроб. Створи гарний та структурований звіт (технічне завдання) по об'єкту на основі даних нижче.\n"
+                f"СУВОРА ВИМОГА: Використовуй ВИКЛЮЧНО ті назви приміщень, які є в даних (Передпокій, Кухня, Балкон, Гардероб, Підвал, Горище, Санвузол, Кімната). "
+                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати синоніми на кшталт 'мансарда', 'аддиція', 'вбудована шафа', 'комора'.\n"
+                f"ФОРМАТУВАННЯ: Використовуй ТІЛЬКИ теги <b>жирний</b> та <i>курсив</i>. Для нових рядків використовуй звичайний перенос (Enter), для списків - звичайне тире (-). "
+                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати теги <br>, <ul>, <li> та символи Markdown (*, _, #, `).\n\n"
+                f"Дані: {raw_answers}"
             )
             response = model.generate_content(prompt)
             
-            # Додаткова "чистка" результату про всяк випадок, якщо ШІ щось "забув"
-            report_text = response.text.replace("```html", "").replace("```", "").replace("<br>", "\n").replace("<br/>", "\n").replace("<ul>", "").replace("</ul>", "").replace("<li>", "- ").replace("</li>", "\n").strip()
+            # Чистимо текст від будь-яких артефактів, які може залишити Gemini
+            report_text = response.text.replace("```html", "").replace("```", "").strip()
+            # Примусово видаляємо всі можливі варіанти тегів <br>, <ul>, <li>
+            report_text = re.sub(r'<br\s*/?>', '\n', report_text, flags=re.IGNORECASE)
+            report_text = re.sub(r'</?ul>', '', report_text, flags=re.IGNORECASE)
+            report_text = re.sub(r'<li>', '- ', report_text, flags=re.IGNORECASE)
+            report_text = re.sub(r'</li>', '\n', report_text, flags=re.IGNORECASE)
+            # Видаляємо маркдаун-зірочки (щоб уникнути помилок парсингу)
+            report_text = report_text.replace("**", "").replace("*", "")
             
             save_report_to_cell(row_id, report_text)
             
@@ -326,13 +333,13 @@ async def generate_report_action(callback: CallbackQuery):
         await callback.message.answer(f"Помилка: {e}")
     await callback.answer()
 
-# --- КНОПКА КАЛЬКУЛЯТОРА ---
+# --- КНОПКА КАЛЬКУЛЯТОРА (З ДЕТАЛІЗАЦІЄЮ) ---
 @dp.callback_query(F.data.startswith("calc_"))
 async def run_calculation(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
     sheet = get_google_sheet()
     
-    await callback.answer("Рахуємо гроші... ⏳")
+    await callback.answer("Аналізуємо заміри та рахуємо... ⏳")
     
     try:
         row_data = sheet.row_values(row_id)
@@ -342,12 +349,43 @@ async def run_calculation(callback: CallbackQuery):
         b = calculate_budget(data_json)
         c = b["costs"]
         
-        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n"
+        # Витягуємо клієнтські дані для деталізації
+        client_info = data_json.get("client", {})
+        measurements = data_json.get("answers", {}).get("measurements", {})
+        
+        total_area = client_info.get("area", 0)
+        floor = client_info.get("floor", 1)
+        elevator = client_info.get("elevator", "Немає")
+        
+        # --- ФОРМУВАННЯ БЛОКУ "ДЕТАЛІЗАЦІЯ" ---
+        details = f"📐 **ОБСЯГИ ТА ЗАМІРИ:**\n"
+        details += f"▪️ **Площа загальна:** {total_area} м² (Поверх {floor} | Ліфт: {elevator})\n"
+        details += f"▪️ **Електроточки:** ~{b['sockets']} шт.\n"
+        
+        if measurements:
+            details += f"▪️ **Приміщення:**\n"
+            name_map = {"hallway": "Передпокій", "kitchen": "Кухня", "balcony": "Балкон", "wardrobe": "Гардероб", "basement": "Підвал", "attic": "Горище"}
+            for k, v in measurements.items():
+                f_sq = v.get("floor", 0)
+                w_sq = v.get("walls", 0)
+                
+                if "room_" in k: n_name = f"Кімната {k.split('_')[1]}"
+                elif "bath_" in k: n_name = f"Санвузол {k.split('_')[1]}"
+                else: n_name = name_map.get(k, k)
+                
+                if "bath" in k:
+                    details += f"  - {n_name}: підлога {f_sq} м² *(плитка вкругову ~{float(f_sq)*4.5:.1f} м²)*\n"
+                else:
+                    details += f"  - {n_name}: підлога {f_sq} м² | стіни {w_sq} м²\n"
+        
+        # --- ФОРМУВАННЯ БЛОКУ "ФІНАНСИ" ---
+        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n"
+        text += f"💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
         
         if c["rough"][0] > 0:
             text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
         
-        text += f"⚡️ **Електрика (~{b['sockets']} точок + розводка):**\nРобота: {c['electric'][0]:,.0f} грн | Матеріали: ~{c['electric'][1]:,.0f} грн\n\n"
+        text += f"⚡️ **Електрика (Точки + розводка):**\nРобота: {c['electric'][0]:,.0f} грн | Матеріали: ~{c['electric'][1]:,.0f} грн\n\n"
         
         if c["doors"][0] > 0:
             text += f"🚪 **Двері (Вхідні + Міжкімнатні):**\nРобота: {c['doors'][0]:,.0f} грн | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} грн\n\n"
