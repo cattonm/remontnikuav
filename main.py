@@ -17,8 +17,9 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Імпортуємо оновлені функції бази даних з security.py
+# --- ІМПОРТ НАШИХ МОДУЛІВ ---
 from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users, add_authorized_user, remove_authorized_user
+from lexicon import GEMINI_PROMPT, MSG_START_AUTH, MSG_START_MAIN, MSG_AUTH_SUCCESS, MSG_AUTH_FAIL, MSG_ACCESS_DENIED, MSG_ACCESS_DENIED_ALERT
 
 # --- КОНФІГУРАЦІЯ ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -43,8 +44,10 @@ if GEMINI_API_KEY:
 else:
     model = None
 
-# --- GOOGLE SHEETS ---
-def get_google_sheet():
+# ==========================================
+# СИНХРОННІ ОПЕРАЦІЇ GOOGLE SHEETS (ЯДРО)
+# ==========================================
+def _get_google_sheet():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
@@ -55,14 +58,13 @@ def get_google_sheet():
         logging.error(f"Google Sheet Error: {e}")
         return None
 
-def save_to_sheet(data):
-    sheet = get_google_sheet()
+def _save_to_sheet_sync(data):
+    sheet = _get_google_sheet()
     if not sheet: return False
     try:
         c = data.get('client', {})
         answers = json.dumps(data, ensure_ascii=False)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        
         area = c.get('area', '0')
         address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
         
@@ -73,30 +75,74 @@ def save_to_sheet(data):
         logging.error(f"Save Error: {e}")
         return False
 
-def save_report_to_cell(row_id, report_text):
-    sheet = get_google_sheet()
-    if not sheet: return
-    try:
-        sheet.update_cell(row_id, 7, report_text)
-    except Exception as e:
-        logging.error(f"Report Save Error: {e}")
+def _get_row_data_sync(row_id):
+    sheet = _get_google_sheet()
+    if sheet:
+        try: return sheet.row_values(row_id)
+        except: return None
+    return None
 
-def get_cached_report(row_id):
-    sheet = get_google_sheet()
+def _save_report_sync(row_id, text):
+    sheet = _get_google_sheet()
+    if sheet:
+        try: sheet.update_cell(row_id, 7, text)
+        except Exception as e: logging.error(f"Report Save Error: {e}")
+
+def _delete_row_sync(row_id):
+    sheet = _get_google_sheet()
+    if sheet:
+        try: sheet.delete_rows(row_id)
+        except Exception as e: logging.error(f"Delete Error: {e}")
+
+def _get_orders_keyboard_sync():
+    sheet = _get_google_sheet()
     if not sheet: return None
     try:
-        return sheet.cell(row_id, 7).value
-    except:
+        rows = sheet.get_all_values()
+        if not rows or len(rows) < 2: return None
+
+        builder = InlineKeyboardBuilder()
+        for i, row in enumerate(rows[1:], start=2):
+            name = row[1] if len(row) > 1 else "Невідомо"
+            phone = row[2] if len(row) > 2 else "..."
+            builder.button(text=f"{name} | {phone}", callback_data=f"view_{i}")
+
+        builder.adjust(1)
+        builder.button(text="🔄 Оновити список", callback_data="show_list")
+        return builder.as_markup()
+    except Exception as e:
+        logging.error(f"Keyboard Error: {e}")
         return None
 
-# --- КАЛЬКУЛЯТОР ВАРТОСТІ ---
+# ==========================================
+# АСИНХРОННІ ОБГОРТКИ (НЕ БЛОКУЮТЬ БОТА!)
+# ==========================================
+async def async_save_to_sheet(data):
+    return await asyncio.to_thread(_save_to_sheet_sync, data)
+
+async def async_get_row_data(row_id):
+    return await asyncio.to_thread(_get_row_data_sync, row_id)
+
+async def async_save_report(row_id, text):
+    await asyncio.to_thread(_save_report_sync, row_id, text)
+
+async def async_delete_row(row_id):
+    await asyncio.to_thread(_delete_row_sync, row_id)
+
+async def async_get_orders_keyboard():
+    return await asyncio.to_thread(_get_orders_keyboard_sync)
+
+# ==========================================
+# КАЛЬКУЛЯТОР ВАРТОСТІ (БЕЗ ЗМІН)
+# ==========================================
 def calculate_budget(data_json):
     costs = {
         "rough": [0, 0, 0],      
         "electric": [0, 0, 0],   
         "doors": [0, 0, 0],      
         "rooms": [0, 0, 0],      
-        "baths": [0, 0, 0]       
+        "baths": [0, 0, 0],
+        "logistics": [0, 0, 0]
     }
     
     client = data_json.get("client", {})
@@ -104,12 +150,22 @@ def calculate_budget(data_json):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
+    floor = int(client.get("floor", 1) or 1)
+    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
 
-    # 1. ЧОРНОВІ РОБОТИ
+    # 1. ЛОГІСТИКА
+    logistics_work = total_area * 150
+    if elevator == "Немає" and floor > 1:
+        logistics_work += (total_area * 30 * floor)
+    elif elevator == "Пасажирський":
+        logistics_work += (total_area * 10 * floor)
+    costs["logistics"][0] += logistics_work
+
+    # 2. ЧОРНОВІ РОБОТИ
     screed_ans = answers.get("screed_done", "")
     if "Мокра" in screed_ans:
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
@@ -119,7 +175,7 @@ def calculate_budget(data_json):
     if answers.get("plumbing_done") == "Ні":
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
 
-    # 2. ЕЛЕКТРИКА
+    # 3. ЕЛЕКТРИКА
     sockets = 0
     if answers.get('kitchen_needed') != 'Ні': sockets += 10
     if answers.get('hallway_needed') != 'Ні': sockets += 4
@@ -137,7 +193,7 @@ def calculate_budget(data_json):
         costs["electric"][0] += total_area * 1200; costs["electric"][1] += total_area * 800; costs["electric"][2] += total_area * 800
     costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
 
-    # 3. ДВЕРІ
+    # 4. ДВЕРІ
     if answers.get("entrance_door") == "Так":
         costs["doors"][0] += 5000; costs["doors"][1] += 15000; costs["doors"][2] += 50000
         
@@ -148,7 +204,7 @@ def calculate_budget(data_json):
     elif "Стандарт" in int_door:
         costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
 
-    # 4. ПОКРИТТЯ ТА ОЗДОБЛЕННЯ
+    # 5. ПОКРИТТЯ ТА ОЗДОБЛЕННЯ
     for zone_id in measurements.keys():
         floor_sq = get_sq(zone_id, "floor")
         wall_sq = get_sq(zone_id, "walls")
@@ -226,22 +282,6 @@ def calculate_budget(data_json):
         "sockets": sockets
     }
 
-def get_orders_keyboard():
-    sheet = get_google_sheet()
-    if not sheet: return None
-    rows = sheet.get_all_values()
-    if len(rows) < 2: return None
-
-    builder = InlineKeyboardBuilder()
-    for i, row in enumerate(rows[1:], start=2):
-        name = row[1] if len(row) > 1 else "Невідомо"
-        phone = row[2] if len(row) > 2 else "..."
-        builder.button(text=f"{name} | {phone}", callback_data=f"view_{i}")
-
-    builder.adjust(1)
-    builder.button(text="🔄 Оновити список", callback_data="show_list")
-    return builder.as_markup()
-
 def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -254,27 +294,22 @@ def get_main_menu_keyboard():
 # ОБРОБНИКИ (КОМАНДИ ТА КНОПКИ)
 # ==========================================
 
-# СТАРТ
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id):
         await message.answer(
-            f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
-            "🔒 Цей бот є закритим інструментом.\n"
-            "Будь ласка, введіть пароль доступу:", 
+            MSG_START_AUTH.format(name=message.from_user.first_name), 
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
         return
 
     await message.answer(
-        f"👋 **Вітаю, {message.from_user.first_name}!**\n\n"
-        "Головне меню відкрито. Оберіть дію нижче:", 
+        MSG_START_MAIN.format(name=message.from_user.first_name), 
         reply_markup=get_main_menu_keyboard(), 
         parse_mode="Markdown"
     )
 
-# Секретна панель супер-адміна
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
     try: await message.delete() 
@@ -300,13 +335,12 @@ async def secret_admin_panel(message: Message):
 @dp.callback_query(F.data.startswith("revoke_"))
 async def revoke_access(callback: CallbackQuery):
     if callback.from_user.id != MASTER_ADMIN_ID:
-        return await callback.answer("⛔️ Немає доступу.", show_alert=True)
+        return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
 
     target_uid = callback.data.split("_")[1]
     
     if remove_authorized_user(target_uid):
         await callback.answer("✅ Доступ скасовано!", show_alert=True)
-        
         auth_data = get_all_authorized_users()
         if not auth_data:
             return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
@@ -322,20 +356,18 @@ async def revoke_access(callback: CallbackQuery):
     else:
         await callback.answer("Помилка видалення.", show_alert=True)
 
-# КАБІНЕТ МЕНЕДЖЕРА
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
     if not is_authorized(message.from_user.id):
-        return await message.answer("⛔️ **Доступ заборонено.**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
+        return await message.answer(MSG_ACCESS_DENIED, parse_mode="Markdown")
 
-    kb = get_orders_keyboard()
+    await message.answer("⏳ Завантажую базу даних...") # Фідбек для юзера, поки Google відповідає
+    kb = await async_get_orders_keyboard()
     if kb: await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else: await message.answer("📭 Список заявок порожній.")
 
-# ==========================================
-# ПЕРЕХОПЛЕННЯ ТЕКСТУ (ЛОГІКА ПАРОЛІВ ТА ЛОГІВ)
-# ==========================================
+# Обробка паролів
 @dp.message(F.text)
 async def process_password_attempts(message: Message):
     user_id = message.from_user.id
@@ -343,96 +375,75 @@ async def process_password_attempts(message: Message):
     if is_authorized(user_id):
         return
         
-    # Ввели правильний пароль
     if message.text == ADMIN_PASSWORD:
         add_authorized_user(user_id, message.from_user.full_name, message.from_user.username or "немає_юзернейму")
-        
         try: await message.delete() 
         except: pass
         
-        await message.answer("✅ **Доступ дозволено!** Ваші дані збережено у безпечній базі. Головне меню відкрито.", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        await message.answer(MSG_AUTH_SUCCESS, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
         
-        # Лог УСПІХУ (тобі)
         if user_id != MASTER_ADMIN_ID:
-            log_text = (
-                f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n"
-                f"👤 **Ім'я:** {message.from_user.full_name}\n"
-                f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
-                f"🆔 **ID:** `{user_id}`"
-            )
+            log_text = f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`"
             try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
             except: pass
-
-    # Ввели НЕПРАВИЛЬНИЙ пароль
     else:
         try: await message.delete() 
         except: pass
         
-        await message.answer("⛔️ **Невірний пароль.** Доступ заборонено.", parse_mode="Markdown")
-        
-        # Лог НЕВДАЧІ (тобі)
-        log_text = (
-            f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n"
-            f"👤 **Ім'я:** {message.from_user.full_name}\n"
-            f"🔖 **Username:** @{message.from_user.username or 'немає'}\n"
-            f"🆔 **ID:** `{user_id}`\n"
-            f"🔑 **Введений текст:** `{message.text}`"
-        )
+        await message.answer(MSG_AUTH_FAIL, parse_mode="Markdown")
+        log_text = f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`\n🔑 **Введений текст:** `{message.text}`"
         try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
         except: pass
 
-# ==========================================
-# ОБРОБНИКИ КНОПОК ЗАЯВОК
-# ==========================================
 @dp.callback_query(F.data == "show_list")
 async def refresh_list(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
-    kb = get_orders_keyboard()
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
+    kb = await async_get_orders_keyboard()
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
-    sheet = get_google_sheet()
-    if not sheet: return
+    row_data = await async_get_row_data(row_id)
+    
+    if not row_data:
+        return await callback.message.answer("Помилка: не вдалося завантажити заявку.")
 
-    try:
-        row_data = sheet.row_values(row_id)
-        name = row_data[1] if len(row_data) > 1 else "-"
-        phone = row_data[2] if len(row_data) > 2 else "-"
-        obj_type = row_data[3] if len(row_data) > 3 else "-"
-        address = row_data[4] if len(row_data) > 4 else "-"
-        existing_report = row_data[6] if len(row_data) > 6 else ""
+    name = row_data[1] if len(row_data) > 1 else "-"
+    phone = row_data[2] if len(row_data) > 2 else "-"
+    obj_type = row_data[3] if len(row_data) > 3 else "-"
+    address = row_data[4] if len(row_data) > 4 else "-"
+    existing_report = row_data[6] if len(row_data) > 6 else ""
 
-        text = (
-            f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n"
-            f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Деталі:** {address}"
-        )
+    text = (
+        f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n"
+        f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Деталі:** {address}"
+    )
 
-        kb = InlineKeyboardBuilder()
-        if existing_report and len(existing_report) > 10:
-            kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
-        else:
-            kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
-            
-        kb.button(text="💰 Прорахувати кошторис", callback_data=f"calc_{row_id}")
-        kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
-        kb.button(text="🔙 Назад", callback_data="show_list")
-        kb.adjust(1) 
+    kb = InlineKeyboardBuilder()
+    if existing_report and len(existing_report) > 10:
+        kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
+    else:
+        kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
+        
+    kb.button(text="💰 Прорахувати кошторис", callback_data=f"calc_{row_id}")
+    kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
+    kb.button(text="🔙 Назад", callback_data="show_list")
+    kb.adjust(1) 
 
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-    except:
-        await callback.message.answer("Помилка даних заявки.")
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("showrep_"))
 async def show_saved_report(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
-    report = get_cached_report(row_id)
+    row_data = await async_get_row_data(row_id)
+    report = row_data[6] if row_data and len(row_data) > 6 else None
+    
     if report:
         kb = InlineKeyboardBuilder()
         kb.button(text="🔄 Перегенерувати", callback_data=f"gen_{row_id}")
@@ -444,25 +455,22 @@ async def show_saved_report(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
-    sheet = get_google_sheet()
-    
     await callback.message.answer("⏳ **Генеруємо технічне завдання...**")
+    
     try:
-        row_data = sheet.row_values(row_id)
+        row_data = await async_get_row_data(row_id)
+        if not row_data:
+            return await callback.message.answer("Помилка завантаження даних.")
+            
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
-            prompt = (
-                f"Ти професійний виконроб. Створи гарний та структурований звіт (технічне завдання) по об'єкту на основі даних нижче.\n"
-                f"СУВОРА ВИМОГА: Використовуй ВИКЛЮЧНО ті назви приміщень, які є в даних. КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати синоніми.\n"
-                f"ФОРМАТУВАННЯ: Використовуй ТІЛЬКИ теги <b>жирний</b> та <i>курсив</i>. Для нових рядків використовуй звичайний перенос, для списків - звичайне тире (-). "
-                f"КАТЕГОРИЧНО ЗАБОРОНЕНО використовувати теги <br>, <ul>, <li> та символи Markdown (*, _, #, `).\n\n"
-                f"Дані: {raw_answers}"
-            )
-            response = model.generate_content(prompt)
+            prompt = GEMINI_PROMPT.format(raw_answers=raw_answers)
+            # Запит до Gemini також відправляємо в асинхронний потік, щоб не блокувати бота!
+            response = await asyncio.to_thread(model.generate_content, prompt)
             
             report_text = response.text.replace("```html", "").replace("```", "").strip()
             report_text = re.sub(r'<br\s*/?>', '\n', report_text, flags=re.IGNORECASE)
@@ -471,7 +479,7 @@ async def generate_report_action(callback: CallbackQuery):
             report_text = re.sub(r'</li>', '\n', report_text, flags=re.IGNORECASE)
             report_text = report_text.replace("**", "").replace("*", "")
             
-            save_report_to_cell(row_id, report_text)
+            await async_save_report(row_id, report_text)
             
             kb = InlineKeyboardBuilder()
             kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
@@ -485,16 +493,14 @@ async def generate_report_action(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("calc_"))
 async def run_calculation(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
-    sheet = get_google_sheet()
-    
     await callback.answer("Аналізуємо заміри та рахуємо... ⏳")
     
     try:
-        row_data = sheet.row_values(row_id)
-        raw_data = row_data[5] if len(row_data) > 5 else "{}"
+        row_data = await async_get_row_data(row_id)
+        raw_data = row_data[5] if row_data and len(row_data) > 5 else "{}"
         data_json = json.loads(raw_data)
         
         b = calculate_budget(data_json)
@@ -558,12 +564,11 @@ async def run_calculation(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer("⛔️ Доступ заборонено", show_alert=True)
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     
     row_id = int(callback.data.split("_")[1])
-    sheet = get_google_sheet()
     try:
-        sheet.delete_rows(row_id)
+        await async_delete_row(row_id)
         await callback.answer("✅ Видалено!", show_alert=True)
         await refresh_list(callback)
     except Exception as e:
@@ -571,10 +576,11 @@ async def delete_order(callback: CallbackQuery):
 
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
-    if not is_authorized(message.from_user.id): return await message.answer("⛔️ Доступ заборонено.")
+    if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
     
     data = json.loads(message.web_app_data.data)
-    if save_to_sheet(data):
+    # Зберігаємо в окремому потоці, щоб не блокувати бота
+    if await async_save_to_sheet(data):
         await message.answer("✅ **Заявку прийнято!**", parse_mode="Markdown")
     else:
         await message.answer("⚠️ Помилка. Спробуйте ще раз.")
