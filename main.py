@@ -17,7 +17,8 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, load_auth, save_auth, is_authorized
+# Імпортуємо оновлені функції бази даних з security.py
+from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users, add_authorized_user, remove_authorized_user
 
 # --- КОНФІГУРАЦІЯ ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -95,8 +96,7 @@ def calculate_budget(data_json):
         "electric": [0, 0, 0],   
         "doors": [0, 0, 0],      
         "rooms": [0, 0, 0],      
-        "baths": [0, 0, 0],
-        "logistics": [0, 0, 0]
+        "baths": [0, 0, 0]       
     }
     
     client = data_json.get("client", {})
@@ -104,8 +104,6 @@ def calculate_budget(data_json):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
-    floor = int(client.get("floor", 1) or 1)
-    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
@@ -183,7 +181,6 @@ def calculate_budget(data_json):
             elif "Паркет" in f_type:
                 costs["rooms"][0] += floor_sq * 850; costs["rooms"][1] += floor_sq * 2500; costs["rooms"][2] += floor_sq * 5000
             
-            # Стіни та УКОСИ
             w_type = answers.get(f"{prefix}_walls", "")
             slopes_len = wall_sq * 0.35
             w_work = 0; w_mat_min = 0; w_mat_max = 0
@@ -198,7 +195,6 @@ def calculate_budget(data_json):
             costs["rooms"][0] += wall_sq * w_work; costs["rooms"][1] += wall_sq * w_mat_min; costs["rooms"][2] += wall_sq * w_mat_max
             costs["rooms"][0] += slopes_len * w_work; costs["rooms"][1] += slopes_len * w_mat_min; costs["rooms"][2] += slopes_len * w_mat_max
             
-            # Плінтус та тіньовий шов стелі
             if floor_sq > 0:
                 perimeter = math.sqrt(floor_sq) * 4
                 base_t = answers.get("baseboard", "")
@@ -258,7 +254,7 @@ def get_main_menu_keyboard():
 # ОБРОБНИКИ (КОМАНДИ ТА КНОПКИ)
 # ==========================================
 
-# СТАРТ - Перевіряємо авторизацію одразу
+# СТАРТ
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id):
@@ -267,7 +263,7 @@ async def cmd_start(message: Message):
             "🔒 Цей бот є закритим інструментом.\n"
             "Будь ласка, введіть пароль доступу:", 
             parse_mode="Markdown",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True) # Ховаємо будь-які кнопки
+            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
         )
         return
 
@@ -287,7 +283,7 @@ async def secret_admin_panel(message: Message):
     if message.from_user.id != MASTER_ADMIN_ID:
         return
 
-    auth_data = load_auth()
+    auth_data = get_all_authorized_users()
     if not auth_data:
         return await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
 
@@ -307,13 +303,11 @@ async def revoke_access(callback: CallbackQuery):
         return await callback.answer("⛔️ Немає доступу.", show_alert=True)
 
     target_uid = callback.data.split("_")[1]
-    auth_data = load_auth()
     
-    if target_uid in auth_data:
-        del auth_data[target_uid]
-        save_auth(auth_data)
+    if remove_authorized_user(target_uid):
         await callback.answer("✅ Доступ скасовано!", show_alert=True)
         
+        auth_data = get_all_authorized_users()
         if not auth_data:
             return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
             
@@ -325,6 +319,8 @@ async def revoke_access(callback: CallbackQuery):
             kb.button(text=label, callback_data=f"revoke_{uid}")
         kb.adjust(1)
         await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
+    else:
+        await callback.answer("Помилка видалення.", show_alert=True)
 
 # КАБІНЕТ МЕНЕДЖЕРА
 @dp.message(F.text == "🔐 Кабінет менеджера")
@@ -344,25 +340,19 @@ async def open_admin_panel(message: Message):
 async def process_password_attempts(message: Message):
     user_id = message.from_user.id
     
-    # Якщо людина вже має доступ - просто ігноруємо випадковий текст
     if is_authorized(user_id):
         return
         
-    # Людина БЕЗ доступу ввела правильний пароль
+    # Ввели правильний пароль
     if message.text == ADMIN_PASSWORD:
-        auth_data = load_auth()
-        auth_data[str(user_id)] = {
-            "name": message.from_user.full_name,
-            "username": message.from_user.username or "немає_юзернейму"
-        }
-        save_auth(auth_data)
+        add_authorized_user(user_id, message.from_user.full_name, message.from_user.username or "немає_юзернейму")
         
         try: await message.delete() 
         except: pass
         
-        await message.answer("✅ **Доступ дозволено!** Ваші дані збережено. Головне меню відкрито.", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        await message.answer("✅ **Доступ дозволено!** Ваші дані збережено у безпечній базі. Головне меню відкрито.", reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
         
-        # Лог УСПІХУ (надсилаємо тобі, якщо зайшов хтось інший)
+        # Лог УСПІХУ (тобі)
         if user_id != MASTER_ADMIN_ID:
             log_text = (
                 f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n"
@@ -373,14 +363,14 @@ async def process_password_attempts(message: Message):
             try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
             except: pass
 
-    # Людина БЕЗ доступу ввела НЕПРАВИЛЬНИЙ пароль
+    # Ввели НЕПРАВИЛЬНИЙ пароль
     else:
         try: await message.delete() 
         except: pass
         
         await message.answer("⛔️ **Невірний пароль.** Доступ заборонено.", parse_mode="Markdown")
         
-        # Лог НЕВДАЧІ (надсилаємо тобі завжди)
+        # Лог НЕВДАЧІ (тобі)
         log_text = (
             f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n"
             f"👤 **Ім'я:** {message.from_user.full_name}\n"
@@ -390,7 +380,6 @@ async def process_password_attempts(message: Message):
         )
         try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
         except: pass
-
 
 # ==========================================
 # ОБРОБНИКИ КНОПОК ЗАЯВОК
