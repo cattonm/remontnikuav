@@ -17,7 +17,6 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- ІМПОРТ НАШИХ МОДУЛІВ ---
 from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users, add_authorized_user, remove_authorized_user
 from lexicon import GEMINI_PROMPT, MSG_START_AUTH, MSG_START_MAIN, MSG_AUTH_SUCCESS, MSG_AUTH_FAIL, MSG_ACCESS_DENIED, MSG_ACCESS_DENIED_ALERT
 
@@ -33,6 +32,9 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
+# Секретний токен для захисту Webhook
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'DefaultSecretToken12345')
+
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 bot = Bot(token=BOT_TOKEN)
@@ -45,7 +47,7 @@ else:
     model = None
 
 # ==========================================
-# СИНХРОННІ ОПЕРАЦІЇ GOOGLE SHEETS (ЯДРО)
+# СИНХРОННІ ОПЕРАЦІЇ GOOGLE SHEETS
 # ==========================================
 def _get_google_sheet():
     try:
@@ -94,28 +96,55 @@ def _delete_row_sync(row_id):
         try: sheet.delete_rows(row_id)
         except Exception as e: logging.error(f"Delete Error: {e}")
 
-def _get_orders_keyboard_sync():
+# ПАГІНАЦІЯ: Відображення заявок по сторінках (по 10 штук)
+def _get_orders_keyboard_sync(page=1):
     sheet = _get_google_sheet()
     if not sheet: return None
     try:
         rows = sheet.get_all_values()
         if not rows or len(rows) < 2: return None
 
+        data_rows = rows[1:] # Пропускаємо заголовки
+        per_page = 10
+        total_pages = math.ceil(len(data_rows) / per_page)
+        
+        if page < 1: page = 1
+        if page > total_pages: page = total_pages
+        
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_rows = data_rows[start_idx:end_idx]
+
         builder = InlineKeyboardBuilder()
-        for i, row in enumerate(rows[1:], start=2):
+        for i, row in enumerate(page_rows):
+            actual_row_id = start_idx + i + 2 # +2 бо 0-індекс і є рядок заголовків
             name = row[1] if len(row) > 1 else "Невідомо"
             phone = row[2] if len(row) > 2 else "..."
-            builder.button(text=f"{name} | {phone}", callback_data=f"view_{i}")
+            builder.button(text=f"{name} | {phone}", callback_data=f"view_{actual_row_id}")
 
         builder.adjust(1)
-        builder.button(text="🔄 Оновити список", callback_data="show_list")
+
+        # Додаємо навігаційні кнопки знизу
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
+        
+        nav_buttons.append(InlineKeyboardButton(text=f"Стор. {page}/{total_pages}", callback_data="ignore"))
+        
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
+
+        if len(data_rows) > per_page:
+            builder.row(*nav_buttons)
+            
+        builder.row(InlineKeyboardButton(text="🔄 Оновити список", callback_data=f"page_{page}"))
         return builder.as_markup()
     except Exception as e:
         logging.error(f"Keyboard Error: {e}")
         return None
 
 # ==========================================
-# АСИНХРОННІ ОБГОРТКИ (НЕ БЛОКУЮТЬ БОТА!)
+# АСИНХРОННІ ОБГОРТКИ
 # ==========================================
 async def async_save_to_sheet(data):
     return await asyncio.to_thread(_save_to_sheet_sync, data)
@@ -129,8 +158,8 @@ async def async_save_report(row_id, text):
 async def async_delete_row(row_id):
     await asyncio.to_thread(_delete_row_sync, row_id)
 
-async def async_get_orders_keyboard():
-    return await asyncio.to_thread(_get_orders_keyboard_sync)
+async def async_get_orders_keyboard(page=1):
+    return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
 # ==========================================
 # КАЛЬКУЛЯТОР ВАРТОСТІ (БЕЗ ЗМІН)
@@ -157,7 +186,6 @@ def calculate_budget(data_json):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
 
-    # 1. ЛОГІСТИКА
     logistics_work = total_area * 150
     if elevator == "Немає" and floor > 1:
         logistics_work += (total_area * 30 * floor)
@@ -165,7 +193,6 @@ def calculate_budget(data_json):
         logistics_work += (total_area * 10 * floor)
     costs["logistics"][0] += logistics_work
 
-    # 2. ЧОРНОВІ РОБОТИ
     screed_ans = answers.get("screed_done", "")
     if "Мокра" in screed_ans:
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
@@ -175,7 +202,6 @@ def calculate_budget(data_json):
     if answers.get("plumbing_done") == "Ні":
         costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
 
-    # 3. ЕЛЕКТРИКА
     sockets = 0
     if answers.get('kitchen_needed') != 'Ні': sockets += 10
     if answers.get('hallway_needed') != 'Ні': sockets += 4
@@ -193,7 +219,6 @@ def calculate_budget(data_json):
         costs["electric"][0] += total_area * 1200; costs["electric"][1] += total_area * 800; costs["electric"][2] += total_area * 800
     costs["electric"][0] += sockets * 180; costs["electric"][1] += sockets * 250; costs["electric"][2] += sockets * 250
 
-    # 4. ДВЕРІ
     if answers.get("entrance_door") == "Так":
         costs["doors"][0] += 5000; costs["doors"][1] += 15000; costs["doors"][2] += 50000
         
@@ -204,14 +229,12 @@ def calculate_budget(data_json):
     elif "Стандарт" in int_door:
         costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
 
-    # 5. ПОКРИТТЯ ТА ОЗДОБЛЕННЯ
     for zone_id in measurements.keys():
         floor_sq = get_sq(zone_id, "floor")
         wall_sq = get_sq(zone_id, "walls")
         prefix = zone_id.split('_')[0] if "room" not in zone_id and "bath" not in zone_id else zone_id
         is_bath = "bath" in prefix
         
-        # --- САНВУЗОЛ ---
         if is_bath:
             tile_sq = floor_sq * 4.5
             costs["baths"][0] += tile_sq * 3000
@@ -223,7 +246,6 @@ def calculate_budget(data_json):
             if "Акрил" in tub_type or "Окремостояча" in tub_type:
                 costs["baths"][0] += 3800; costs["baths"][1] += 15000; costs["baths"][2] += 80000
 
-        # --- ЖИТЛОВІ ЗОНИ ---
         if not is_bath:
             f_type = answers.get(f"{prefix}_floor", "")
             if isinstance(f_type, dict): f_type = f_type.get("type", "")
@@ -265,7 +287,6 @@ def calculate_budget(data_json):
                 if answers.get("ceiling_shadow") == "Так":
                     costs["rooms"][0] += perimeter * 500 
 
-    # 5. СТЕЛЯ БАЗОВА
     ceil_t = answers.get("ceiling", "")
     if "Натяжна" in ceil_t:
         costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
@@ -293,34 +314,21 @@ def get_main_menu_keyboard():
 # ==========================================
 # ОБРОБНИКИ (КОМАНДИ ТА КНОПКИ)
 # ==========================================
-
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id):
-        await message.answer(
-            MSG_START_AUTH.format(name=message.from_user.first_name), 
-            parse_mode="Markdown",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-        )
+        await message.answer(MSG_START_AUTH.format(name=message.from_user.first_name), parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         return
-
-    await message.answer(
-        MSG_START_MAIN.format(name=message.from_user.first_name), 
-        reply_markup=get_main_menu_keyboard(), 
-        parse_mode="Markdown"
-    )
+    await message.answer(MSG_START_MAIN.format(name=message.from_user.first_name), reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
     try: await message.delete() 
     except: pass
-    
-    if message.from_user.id != MASTER_ADMIN_ID:
-        return
+    if message.from_user.id != MASTER_ADMIN_ID: return
 
     auth_data = get_all_authorized_users()
-    if not auth_data:
-        return await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
+    if not auth_data: return await message.answer("🕵️‍♂️ База авторизованих користувачів порожня.")
 
     kb = InlineKeyboardBuilder()
     for uid, info in auth_data.items():
@@ -330,20 +338,17 @@ async def secret_admin_panel(message: Message):
         kb.button(text=label, callback_data=f"revoke_{uid}")
     
     kb.adjust(1)
-    await message.answer("🕵️‍♂️ **Секретна панель доступу:**\nНатисніть на людину, щоб забрати в неї доступ.", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await message.answer("🕵️‍♂️ **Секретна панель доступу:**", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("revoke_"))
 async def revoke_access(callback: CallbackQuery):
-    if callback.from_user.id != MASTER_ADMIN_ID:
-        return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
+    if callback.from_user.id != MASTER_ADMIN_ID: return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
 
     target_uid = callback.data.split("_")[1]
-    
     if remove_authorized_user(target_uid):
         await callback.answer("✅ Доступ скасовано!", show_alert=True)
         auth_data = get_all_authorized_users()
-        if not auth_data:
-            return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
+        if not auth_data: return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
             
         kb = InlineKeyboardBuilder()
         for uid, info in auth_data.items():
@@ -359,29 +364,22 @@ async def revoke_access(callback: CallbackQuery):
 @dp.message(F.text == "🔐 Кабінет менеджера")
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
-    if not is_authorized(message.from_user.id):
-        return await message.answer(MSG_ACCESS_DENIED, parse_mode="Markdown")
-
-    await message.answer("⏳ Завантажую базу даних...") # Фідбек для юзера, поки Google відповідає
-    kb = await async_get_orders_keyboard()
+    if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED, parse_mode="Markdown")
+    await message.answer("⏳ Завантажую базу даних...")
+    kb = await async_get_orders_keyboard(page=1)
     if kb: await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else: await message.answer("📭 Список заявок порожній.")
 
-# Обробка паролів
 @dp.message(F.text)
 async def process_password_attempts(message: Message):
     user_id = message.from_user.id
-    
-    if is_authorized(user_id):
-        return
+    if is_authorized(user_id): return
         
     if message.text == ADMIN_PASSWORD:
         add_authorized_user(user_id, message.from_user.full_name, message.from_user.username or "немає_юзернейму")
         try: await message.delete() 
         except: pass
-        
         await message.answer(MSG_AUTH_SUCCESS, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
-        
         if user_id != MASTER_ADMIN_ID:
             log_text = f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`"
             try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
@@ -389,28 +387,39 @@ async def process_password_attempts(message: Message):
     else:
         try: await message.delete() 
         except: pass
-        
         await message.answer(MSG_AUTH_FAIL, parse_mode="Markdown")
         log_text = f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`\n🔑 **Введений текст:** `{message.text}`"
         try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
         except: pass
 
-@dp.callback_query(F.data == "show_list")
-async def refresh_list(callback: CallbackQuery):
+# Обробка пагінації (перемикання сторінок)
+@dp.callback_query(F.data.startswith("page_"))
+async def change_page(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    kb = await async_get_orders_keyboard()
+    page = int(callback.data.split("_")[1])
+    kb = await async_get_orders_keyboard(page=page)
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
+
+# Обробка кнопки "Оновити список / Назад до списку"
+@dp.callback_query(F.data == "show_list")
+async def show_first_page(callback: CallbackQuery):
+    if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
+    kb = await async_get_orders_keyboard(page=1)
+    msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
+    await callback.message.edit_text(msg, reply_markup=kb)
+
+@dp.callback_query(F.data == "ignore")
+async def ignore_callback(callback: CallbackQuery):
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_order(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    
     row_id = int(callback.data.split("_")[1])
     row_data = await async_get_row_data(row_id)
     
-    if not row_data:
-        return await callback.message.answer("Помилка: не вдалося завантажити заявку.")
+    if not row_data: return await callback.message.answer("Помилка: не вдалося завантажити заявку.")
 
     name = row_data[1] if len(row_data) > 1 else "-"
     phone = row_data[2] if len(row_data) > 2 else "-"
@@ -418,10 +427,7 @@ async def view_order(callback: CallbackQuery):
     address = row_data[4] if len(row_data) > 4 else "-"
     existing_report = row_data[6] if len(row_data) > 6 else ""
 
-    text = (
-        f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n"
-        f"🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Деталі:** {address}"
-    )
+    text = f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Деталі:** {address}"
 
     kb = InlineKeyboardBuilder()
     if existing_report and len(existing_report) > 10:
@@ -433,13 +439,11 @@ async def view_order(callback: CallbackQuery):
     kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
     kb.button(text="🔙 Назад", callback_data="show_list")
     kb.adjust(1) 
-
     await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("showrep_"))
 async def show_saved_report(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    
     row_id = int(callback.data.split("_")[1])
     row_data = await async_get_row_data(row_id)
     report = row_data[6] if row_data and len(row_data) > 6 else None
@@ -456,20 +460,16 @@ async def show_saved_report(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    
     row_id = int(callback.data.split("_")[1])
     await callback.message.answer("⏳ **Генеруємо технічне завдання...**")
     
     try:
         row_data = await async_get_row_data(row_id)
-        if not row_data:
-            return await callback.message.answer("Помилка завантаження даних.")
-            
+        if not row_data: return await callback.message.answer("Помилка завантаження даних.")
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         
         if model:
             prompt = GEMINI_PROMPT.format(raw_answers=raw_answers)
-            # Запит до Gemini також відправляємо в асинхронний потік, щоб не блокувати бота!
             response = await asyncio.to_thread(model.generate_content, prompt)
             
             report_text = response.text.replace("```html", "").replace("```", "").strip()
@@ -480,10 +480,8 @@ async def generate_report_action(callback: CallbackQuery):
             report_text = report_text.replace("**", "").replace("*", "")
             
             await async_save_report(row_id, report_text)
-            
             kb = InlineKeyboardBuilder()
             kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
-            
             await callback.message.answer(f"📋 <b>ПАСПОРТ ОБ'ЄКТА</b>\n\n{report_text}", reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
             await callback.message.answer("⚠️ AI не підключено.")
@@ -494,7 +492,6 @@ async def generate_report_action(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("calc_"))
 async def run_calculation(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    
     row_id = int(callback.data.split("_")[1])
     await callback.answer("Аналізуємо заміри та рахуємо... ⏳")
     
@@ -505,7 +502,6 @@ async def run_calculation(callback: CallbackQuery):
         
         b = calculate_budget(data_json)
         c = b["costs"]
-        
         client_info = data_json.get("client", {})
         measurements = data_json.get("answers", {}).get("measurements", {})
         
@@ -513,9 +509,7 @@ async def run_calculation(callback: CallbackQuery):
         floor = client_info.get("floor", 1)
         elevator = client_info.get("elevator", "Немає")
         
-        details = f"📐 **ОБСЯГИ ТА ЗАМІРИ:**\n"
-        details += f"▪️ **Площа загальна:** {total_area} м² (Поверх: {floor} | Ліфт: {elevator})\n"
-        details += f"▪️ **Електроточки:** ~{b['sockets']} шт.\n"
+        details = f"📐 **ОБСЯГИ ТА ЗАМІРИ:**\n▪️ **Площа загальна:** {total_area} м² (Поверх: {floor} | Ліфт: {elevator})\n▪️ **Електроточки:** ~{b['sockets']} шт.\n"
         
         if measurements:
             details += f"▪️ **Приміщення:**\n"
@@ -528,17 +522,13 @@ async def run_calculation(callback: CallbackQuery):
                 elif "bath_" in k: n_name = f"Санвузол {k.split('_')[1]}"
                 else: n_name = name_map.get(k, k)
                 
-                if "bath" in k:
-                    details += f"  - {n_name}: підлога {f_sq} м² *(плитка вкругову ~{float(f_sq)*4.5:.1f} м²)*\n"
-                else:
-                    details += f"  - {n_name}: підлога {f_sq} м² | стіни {w_sq} м² *(+укоси)*\n"
+                if "bath" in k: details += f"  - {n_name}: підлога {f_sq} м² *(плитка вкругову ~{float(f_sq)*4.5:.1f} м²)*\n"
+                else: details += f"  - {n_name}: підлога {f_sq} м² | стіни {w_sq} м² *(+укоси)*\n"
         
-        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n"
-        text += f"💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
+        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
             
         if c["rough"][0] > 0:
             text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
-        
         text += f"⚡️ **Електрика (Точки + розводка):**\nРобота: {c['electric'][0]:,.0f} грн | Матеріали: ~{c['electric'][1]:,.0f} грн\n\n"
         
         if c["doors"][0] > 0:
@@ -549,14 +539,10 @@ async def run_calculation(callback: CallbackQuery):
         if c["baths"][0] > 0:
             text += f"🛁 **Санвузли (Плитка, Сантехніка):**\nРобота: {c['baths'][0]:,.0f} грн | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} грн\n\n"
             
-        text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n"
-        text += f"🛠 **Робота:** ~{b['total_work']:,.0f} грн\n"
-        text += f"📦 **Матеріали:** від {b['total_mat_min']:,.0f} грн до {b['total_mat_max']:,.0f} грн\n"
-        text += f"💵 **Всього:** від **{(b['total_work'] + b['total_mat_min']):,.0f} грн** до **{(b['total_work'] + b['total_mat_max']):,.0f} грн**"
+        text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n🛠 **Робота:** ~{b['total_work']:,.0f} грн\n📦 **Матеріали:** від {b['total_mat_min']:,.0f} грн до {b['total_mat_max']:,.0f} грн\n💵 **Всього:** від **{(b['total_work'] + b['total_mat_min']):,.0f} грн** до **{(b['total_work'] + b['total_mat_max']):,.0f} грн**"
         
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
-        
         await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
         
     except Exception as e:
@@ -565,33 +551,35 @@ async def run_calculation(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    
     row_id = int(callback.data.split("_")[1])
     try:
         await async_delete_row(row_id)
         await callback.answer("✅ Видалено!", show_alert=True)
-        await refresh_list(callback)
+        # Повертаємось на першу сторінку після видалення
+        kb = await async_get_orders_keyboard(page=1)
+        msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
+        await callback.message.edit_text(msg, reply_markup=kb)
     except Exception as e:
         await callback.answer(f"Помилка: {e}", show_alert=True)
 
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
-    
     data = json.loads(message.web_app_data.data)
-    # Зберігаємо в окремому потоці, щоб не блокувати бота
     if await async_save_to_sheet(data):
         await message.answer("✅ **Заявку прийнято!**", parse_mode="Markdown")
     else:
         await message.answer("⚠️ Помилка. Спробуйте ще раз.")
 
 async def on_startup(bot: Bot):
-    await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+    # Тепер Telegram буде надсилати нам секретний токен для перевірки!
+    await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
 
 def main():
     dp.startup.register(on_startup)
     app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    # SimpleRequestHandler відхилятиме всі запити, які не містять секретного токена
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
