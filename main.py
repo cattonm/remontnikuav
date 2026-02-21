@@ -30,7 +30,7 @@ WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
 WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
-WEBAPP_URL = "https://remontnikuav.netlify.app"
+WEBAPP_URL = "https://siteremontt.vercel.app/"
 
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'DefaultSecretToken12345')
 
