@@ -21,7 +21,6 @@ def get_auth_sheet():
         client = gspread.authorize(creds)
         doc = client.open(SPREADSHEET_NAME)
         
-        # Шукаємо аркуш Admins. Якщо немає - створюємо.
         try:
             sheet = doc.worksheet("Admins")
         except gspread.exceptions.WorksheetNotFound:
@@ -32,59 +31,69 @@ def get_auth_sheet():
         print(f"Помилка Google Sheets (Auth): {e}")
         return None
 
-def get_all_authorized_users():
-    """Завантажує список авторизованих користувачів із Google Sheets."""
+def get_all_authorized_users(force_refresh=False):
     global _auth_cache
-    if _auth_cache is not None:
+    if _auth_cache is not None and not force_refresh:
         return _auth_cache
 
     sheet = get_auth_sheet()
     if not sheet: return {}
 
-    records = sheet.get_all_records()
-    auth_data = {}
-    for row in records:
-        auth_data[str(row.get("user_id"))] = {
-            "name": row.get("name"),
-            "username": row.get("username")
-        }
-    _auth_cache = auth_data
-    return auth_data
+    try:
+        records = sheet.get_all_values()
+        auth_data = {}
+        for row in records[1:]:
+            if len(row) > 0 and row[0]: 
+                clean_id = str(row[0]).strip()
+                auth_data[clean_id] = {
+                    "name": row[1] if len(row) > 1 else "",
+                    "username": row[2] if len(row) > 2 else ""
+                }
+        _auth_cache = auth_data
+        return auth_data
+    except Exception as e:
+        print(f"Помилка читання даних авторизації: {e}")
+        return {}
 
 def add_authorized_user(user_id, name, username):
-    """Додає нового користувача в Google Sheets."""
     global _auth_cache
+    get_all_authorized_users()
+    
     sheet = get_auth_sheet()
     if not sheet: return False
 
     import datetime
     date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    sheet.append_row([str(user_id), name, username, date_str])
+    clean_id = str(user_id).strip()
+    sheet.append_row([clean_id, name, username, date_str])
 
-    # Оновлюємо кеш
     if _auth_cache is None:
         _auth_cache = {}
-    _auth_cache[str(user_id)] = {"name": name, "username": username}
+    _auth_cache[clean_id] = {"name": name, "username": username}
     return True
 
 def remove_authorized_user(user_id):
-    """Видаляє користувача з Google Sheets."""
     global _auth_cache
     sheet = get_auth_sheet()
     if not sheet: return False
 
+    clean_id = str(user_id).strip()
     try:
-        cell = sheet.find(str(user_id))
+        cell = sheet.find(clean_id)
         sheet.delete_rows(cell.row)
     except gspread.exceptions.CellNotFound:
         pass
 
-    # Оновлюємо кеш
-    if _auth_cache and str(user_id) in _auth_cache:
-        del _auth_cache[str(user_id)]
+    if _auth_cache and clean_id in _auth_cache:
+        del _auth_cache[clean_id]
     return True
 
 def is_authorized(user_id):
-    """Перевіряє доступ."""
     data = get_all_authorized_users()
-    return str(user_id) in data
+    return str(user_id).strip() in data
+
+def clear_auth_cache():
+    """Скидає кеш, змушуючи бота перечитати Google Таблицю."""
+    global _auth_cache
+    _auth_cache = None
+    return True
