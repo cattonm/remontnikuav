@@ -32,7 +32,6 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://remontnikuav.netlify.app"
 
-# Секретний токен для захисту Webhook
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'DefaultSecretToken12345')
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
@@ -77,6 +76,28 @@ def _save_to_sheet_sync(data):
         logging.error(f"Save Error: {e}")
         return False
 
+def _update_row_sync(row_id, data):
+    sheet = _get_google_sheet()
+    if not sheet: return False
+    try:
+        c = data.get('client', {})
+        answers_json = json.dumps(data, ensure_ascii=False)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M") + " (Оновлено)"
+        area = c.get('area', '0')
+        address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
+        
+        # Перезаписуємо комірки A-G. Звіт (G) обнуляємо, бо дані змінилися.
+        row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers_json, ""]
+        cell_list = sheet.range(f'A{row_id}:G{row_id}')
+        
+        for i, val in enumerate(row_data):
+            cell_list[i].value = val
+        sheet.update_cells(cell_list)
+        return True
+    except Exception as e:
+        logging.error(f"Update Error: {e}")
+        return False
+
 def _get_row_data_sync(row_id):
     sheet = _get_google_sheet()
     if sheet:
@@ -96,7 +117,6 @@ def _delete_row_sync(row_id):
         try: sheet.delete_rows(row_id)
         except Exception as e: logging.error(f"Delete Error: {e}")
 
-# ПАГІНАЦІЯ: Відображення заявок по сторінках (по 10 штук)
 def _get_orders_keyboard_sync(page=1):
     sheet = _get_google_sheet()
     if not sheet: return None
@@ -104,7 +124,7 @@ def _get_orders_keyboard_sync(page=1):
         rows = sheet.get_all_values()
         if not rows or len(rows) < 2: return None
 
-        data_rows = rows[1:] # Пропускаємо заголовки
+        data_rows = rows[1:] 
         per_page = 10
         total_pages = math.ceil(len(data_rows) / per_page)
         
@@ -117,20 +137,16 @@ def _get_orders_keyboard_sync(page=1):
 
         builder = InlineKeyboardBuilder()
         for i, row in enumerate(page_rows):
-            actual_row_id = start_idx + i + 2 # +2 бо 0-індекс і є рядок заголовків
+            actual_row_id = start_idx + i + 2 
             name = row[1] if len(row) > 1 else "Невідомо"
             phone = row[2] if len(row) > 2 else "..."
             builder.button(text=f"{name} | {phone}", callback_data=f"view_{actual_row_id}")
 
         builder.adjust(1)
-
-        # Додаємо навігаційні кнопки знизу
         nav_buttons = []
         if page > 1:
             nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-        
         nav_buttons.append(InlineKeyboardButton(text=f"Стор. {page}/{total_pages}", callback_data="ignore"))
-        
         if page < total_pages:
             nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
 
@@ -149,6 +165,9 @@ def _get_orders_keyboard_sync(page=1):
 async def async_save_to_sheet(data):
     return await asyncio.to_thread(_save_to_sheet_sync, data)
 
+async def async_update_row(row_id, data):
+    return await asyncio.to_thread(_update_row_sync, row_id, data)
+
 async def async_get_row_data(row_id):
     return await asyncio.to_thread(_get_row_data_sync, row_id)
 
@@ -162,7 +181,37 @@ async def async_get_orders_keyboard(page=1):
     return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
 # ==========================================
-# КАЛЬКУЛЯТОР ВАРТОСТІ (БЕЗ ЗМІН)
+# API ДЛЯ WEBAPP (РЕДАГУВАННЯ)
+# ==========================================
+async def api_get_order(request):
+    """API для отримання даних існуючої заявки по ID."""
+    # CORS заголовки для безпечного з'єднання з Netlify
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+    }
+    
+    if request.method == 'OPTIONS':
+        return web.Response(headers=headers)
+        
+    row_id = request.rel_url.query.get('id')
+    if not row_id:
+        return web.json_response({"error": "No ID provided"}, status=400, headers=headers)
+    
+    row_data = await async_get_row_data(int(row_id))
+    if not row_data:
+        return web.json_response({"error": "Order not found"}, status=404, headers=headers)
+        
+    try:
+        # В 6-й колонці (індекс 5) у нас лежить повний JSON-об'єкт з усіма відповідями
+        payload = json.loads(row_data[5])
+        return web.json_response(payload, headers=headers)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, headers=headers)
+
+# ==========================================
+# КАЛЬКУЛЯТОР ВАРТОСТІ 
 # ==========================================
 def calculate_budget(data_json):
     costs = {
@@ -187,20 +236,15 @@ def calculate_budget(data_json):
         except: return 0.0
 
     logistics_work = total_area * 150
-    if elevator == "Немає" and floor > 1:
-        logistics_work += (total_area * 30 * floor)
-    elif elevator == "Пасажирський":
-        logistics_work += (total_area * 10 * floor)
+    if elevator == "Немає" and floor > 1: logistics_work += (total_area * 30 * floor)
+    elif elevator == "Пасажирський": logistics_work += (total_area * 10 * floor)
     costs["logistics"][0] += logistics_work
 
     screed_ans = answers.get("screed_done", "")
-    if "Мокра" in screed_ans:
-        costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
-    elif "Напівсуха" in screed_ans:
-        costs["rough"][0] += total_area * 500; costs["rough"][1] += total_area * 500; costs["rough"][2] += total_area * 500
+    if "Мокра" in screed_ans: costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 700; costs["rough"][2] += total_area * 700
+    elif "Напівсуха" in screed_ans: costs["rough"][0] += total_area * 500; costs["rough"][1] += total_area * 500; costs["rough"][2] += total_area * 500
         
-    if answers.get("plumbing_done") == "Ні":
-        costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
+    if answers.get("plumbing_done") == "Ні": costs["rough"][0] += total_area * 1100; costs["rough"][1] += total_area * 300; costs["rough"][2] += total_area * 300
 
     sockets = 0
     if answers.get('kitchen_needed') != 'Ні': sockets += 10
@@ -224,10 +268,8 @@ def calculate_budget(data_json):
         
     int_door = answers.get("interior_door", "")
     doors_count = int(answers.get('rooms_count', 0)) + int(answers.get('baths_count', 0))
-    if "Прихований" in int_door:
-        costs["doors"][0] += doors_count * 30000; costs["doors"][1] += doors_count * 15000; costs["doors"][2] += doors_count * 27000
-    elif "Стандарт" in int_door:
-        costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
+    if "Прихований" in int_door: costs["doors"][0] += doors_count * 30000; costs["doors"][1] += doors_count * 15000; costs["doors"][2] += doors_count * 27000
+    elif "Стандарт" in int_door: costs["doors"][0] += doors_count * 3650; costs["doors"][1] += doors_count * 8000; costs["doors"][2] += doors_count * 15000
 
     for zone_id in measurements.keys():
         floor_sq = get_sq(zone_id, "floor")
@@ -250,25 +292,18 @@ def calculate_budget(data_json):
             f_type = answers.get(f"{prefix}_floor", "")
             if isinstance(f_type, dict): f_type = f_type.get("type", "")
             
-            if "Ламінат" in f_type:
-                costs["rooms"][0] += floor_sq * 405; costs["rooms"][1] += floor_sq * 600; costs["rooms"][2] += floor_sq * 900
-            elif "Кварц" in f_type:
-                costs["rooms"][0] += floor_sq * 565; costs["rooms"][1] += floor_sq * 1200; costs["rooms"][2] += floor_sq * 1800
-            elif "Керамограніт" in f_type or "Плитка" in f_type:
-                costs["rooms"][0] += floor_sq * 715; costs["rooms"][1] += floor_sq * 1500; costs["rooms"][2] += floor_sq * 2500
-            elif "Паркет" in f_type:
-                costs["rooms"][0] += floor_sq * 850; costs["rooms"][1] += floor_sq * 2500; costs["rooms"][2] += floor_sq * 5000
+            if "Ламінат" in f_type: costs["rooms"][0] += floor_sq * 405; costs["rooms"][1] += floor_sq * 600; costs["rooms"][2] += floor_sq * 900
+            elif "Кварц" in f_type: costs["rooms"][0] += floor_sq * 565; costs["rooms"][1] += floor_sq * 1200; costs["rooms"][2] += floor_sq * 1800
+            elif "Керамограніт" in f_type or "Плитка" in f_type: costs["rooms"][0] += floor_sq * 715; costs["rooms"][1] += floor_sq * 1500; costs["rooms"][2] += floor_sq * 2500
+            elif "Паркет" in f_type: costs["rooms"][0] += floor_sq * 850; costs["rooms"][1] += floor_sq * 2500; costs["rooms"][2] += floor_sq * 5000
             
             w_type = answers.get(f"{prefix}_walls", "")
             slopes_len = wall_sq * 0.35
             w_work = 0; w_mat_min = 0; w_mat_max = 0
             
-            if "Шпалери" in w_type:
-                w_work = 1000; w_mat_min = 200; w_mat_max = 400
-            elif "Фарбування" in w_type:
-                w_work = 1865; w_mat_min = 250; w_mat_max = 450
-            elif "Штукатурка" in w_type or "Декор" in w_type:
-                w_work = 2210; w_mat_min = 500; w_mat_max = 1500
+            if "Шпалери" in w_type: w_work = 1000; w_mat_min = 200; w_mat_max = 400
+            elif "Фарбування" in w_type: w_work = 1865; w_mat_min = 250; w_mat_max = 450
+            elif "Штукатурка" in w_type or "Декор" in w_type: w_work = 2210; w_mat_min = 500; w_mat_max = 1500
             
             costs["rooms"][0] += wall_sq * w_work; costs["rooms"][1] += wall_sq * w_mat_min; costs["rooms"][2] += wall_sq * w_mat_max
             costs["rooms"][0] += slopes_len * w_work; costs["rooms"][1] += slopes_len * w_mat_min; costs["rooms"][2] += slopes_len * w_mat_max
@@ -276,22 +311,15 @@ def calculate_budget(data_json):
             if floor_sq > 0:
                 perimeter = math.sqrt(floor_sq) * 4
                 base_t = answers.get("baseboard", "")
+                if "Стандартний" in base_t: costs["rooms"][0] += perimeter * 215; costs["rooms"][1] += perimeter * 150; costs["rooms"][2] += perimeter * 150
+                elif "Тіньовий" in base_t: costs["rooms"][0] += perimeter * 1000; costs["rooms"][1] += perimeter * 400; costs["rooms"][2] += perimeter * 400
+                elif "Прихований" in base_t: costs["rooms"][0] += perimeter * 1600; costs["rooms"][1] += perimeter * 600; costs["rooms"][2] += perimeter * 600
                 
-                if "Стандартний" in base_t:
-                    costs["rooms"][0] += perimeter * 215; costs["rooms"][1] += perimeter * 150; costs["rooms"][2] += perimeter * 150
-                elif "Тіньовий" in base_t:
-                    costs["rooms"][0] += perimeter * 1000; costs["rooms"][1] += perimeter * 400; costs["rooms"][2] += perimeter * 400
-                elif "Прихований" in base_t:
-                    costs["rooms"][0] += perimeter * 1600; costs["rooms"][1] += perimeter * 600; costs["rooms"][2] += perimeter * 600
-                
-                if answers.get("ceiling_shadow") == "Так":
-                    costs["rooms"][0] += perimeter * 500 
+                if answers.get("ceiling_shadow") == "Так": costs["rooms"][0] += perimeter * 500 
 
     ceil_t = answers.get("ceiling", "")
-    if "Натяжна" in ceil_t:
-        costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
-    elif "Гіпсокартон" in ceil_t:
-        costs["rooms"][0] += total_area * 700; costs["rooms"][1] += total_area * 440; costs["rooms"][2] += total_area * 440
+    if "Натяжна" in ceil_t: costs["rooms"][0] += total_area * 300; costs["rooms"][1] += total_area * 390; costs["rooms"][2] += total_area * 390
+    elif "Гіпсокартон" in ceil_t: costs["rooms"][0] += total_area * 700; costs["rooms"][1] += total_area * 440; costs["rooms"][2] += total_area * 440
 
     total_work = sum(c[0] for c in costs.values())
     total_mat_min = sum(c[1] for c in costs.values())
@@ -343,13 +371,11 @@ async def secret_admin_panel(message: Message):
 @dp.callback_query(F.data.startswith("revoke_"))
 async def revoke_access(callback: CallbackQuery):
     if callback.from_user.id != MASTER_ADMIN_ID: return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-
     target_uid = callback.data.split("_")[1]
     if remove_authorized_user(target_uid):
         await callback.answer("✅ Доступ скасовано!", show_alert=True)
         auth_data = get_all_authorized_users()
         if not auth_data: return await callback.message.edit_text("🕵️‍♂️ Всіх користувачів видалено з бази.")
-            
         kb = InlineKeyboardBuilder()
         for uid, info in auth_data.items():
             name = info.get('name', 'Невідомо')
@@ -392,7 +418,6 @@ async def process_password_attempts(message: Message):
         try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
         except: pass
 
-# Обробка пагінації (перемикання сторінок)
 @dp.callback_query(F.data.startswith("page_"))
 async def change_page(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
@@ -401,7 +426,6 @@ async def change_page(callback: CallbackQuery):
     msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
     await callback.message.edit_text(msg, reply_markup=kb)
 
-# Обробка кнопки "Оновити список / Назад до списку"
 @dp.callback_query(F.data == "show_list")
 async def show_first_page(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
@@ -430,12 +454,14 @@ async def view_order(callback: CallbackQuery):
     text = f"👤 **Клієнт:** {name}\n📞 **Телефон:** `{phone}`\n🏠 **Об'єкт:** {obj_type}\n📍 **Адреса / Деталі:** {address}"
 
     kb = InlineKeyboardBuilder()
-    if existing_report and len(existing_report) > 10:
-        kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
-    else:
-        kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
+    if existing_report and len(existing_report) > 10: kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
+    else: kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
         
     kb.button(text="💰 Прорахувати кошторис", callback_data=f"calc_{row_id}")
+    
+    # 💥 НОВА КНОПКА: Передаємо row_id через URL параметр на твій WebApp
+    kb.button(text="✏️ Редагувати анкету", web_app=WebAppInfo(url=f"{WEBAPP_URL}?edit_id={row_id}"))
+    
     kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
     kb.button(text="🔙 Назад", callback_data="show_list")
     kb.adjust(1) 
@@ -527,17 +553,11 @@ async def run_calculation(callback: CallbackQuery):
         
         text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС ОБ'ЄКТА**\n\n{details}\n💵 **ФІНАНСОВИЙ РОЗПОДІЛ:**\n\n"
             
-        if c["rough"][0] > 0:
-            text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
+        if c["rough"][0] > 0: text += f"🧱 **Чорнові роботи (Стяжка, Каналізація):**\nРобота: {c['rough'][0]:,.0f} грн | Матеріали: ~{c['rough'][1]:,.0f} грн\n\n"
         text += f"⚡️ **Електрика (Точки + розводка):**\nРобота: {c['electric'][0]:,.0f} грн | Матеріали: ~{c['electric'][1]:,.0f} грн\n\n"
-        
-        if c["doors"][0] > 0:
-            text += f"🚪 **Двері (Вхідні + Міжкімнатні):**\nРобота: {c['doors'][0]:,.0f} грн | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} грн\n\n"
-            
+        if c["doors"][0] > 0: text += f"🚪 **Двері (Вхідні + Міжкімнатні):**\nРобота: {c['doors'][0]:,.0f} грн | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} грн\n\n"
         text += f"🛋 **Оздоблення кімнат (Підлога, Стіни+Укоси, Стеля, Плінтус):**\nРобота: {c['rooms'][0]:,.0f} грн | Матеріали: {c['rooms'][1]:,.0f} - {c['rooms'][2]:,.0f} грн\n\n"
-        
-        if c["baths"][0] > 0:
-            text += f"🛁 **Санвузли (Плитка, Сантехніка):**\nРобота: {c['baths'][0]:,.0f} грн | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} грн\n\n"
+        if c["baths"][0] > 0: text += f"🛁 **Санвузли (Плитка, Сантехніка):**\nРобота: {c['baths'][0]:,.0f} грн | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} грн\n\n"
             
         text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n🛠 **Робота:** ~{b['total_work']:,.0f} грн\n📦 **Матеріали:** від {b['total_mat_min']:,.0f} грн до {b['total_mat_max']:,.0f} грн\n💵 **Всього:** від **{(b['total_work'] + b['total_mat_min']):,.0f} грн** до **{(b['total_work'] + b['total_mat_max']):,.0f} грн**"
         
@@ -555,7 +575,6 @@ async def delete_order(callback: CallbackQuery):
     try:
         await async_delete_row(row_id)
         await callback.answer("✅ Видалено!", show_alert=True)
-        # Повертаємось на першу сторінку після видалення
         kb = await async_get_orders_keyboard(page=1)
         msg = "📂 **Список заявок:**" if kb else "📭 Порожньо."
         await callback.message.edit_text(msg, reply_markup=kb)
@@ -565,20 +584,43 @@ async def delete_order(callback: CallbackQuery):
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
+    
     data = json.loads(message.web_app_data.data)
-    if await async_save_to_sheet(data):
-        await message.answer("✅ **Заявку прийнято!**", parse_mode="Markdown")
+    edit_id = data.get("edit_id")
+    
+    if edit_id:
+        if await async_update_row(int(edit_id), data):
+            await message.answer(f"✅ **Заявку оновлено!** (Рядок {edit_id})", parse_mode="Markdown")
+        else:
+            await message.answer("⚠️ Помилка оновлення. Спробуйте ще раз.")
     else:
-        await message.answer("⚠️ Помилка. Спробуйте ще раз.")
+        if await async_save_to_sheet(data):
+            await message.answer("✅ **Нову заявку прийнято!**", parse_mode="Markdown")
+        else:
+            await message.answer("⚠️ Помилка збереження. Спробуйте ще раз.")
 
+# ВАЖЛИВО: Не забудь перевірити чи немає помилок On_startup
 async def on_startup(bot: Bot):
-    # Тепер Telegram буде надсилати нам секретний токен для перевірки!
-    await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
+    try:
+        await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
+        logging.info("✅ Webhook успішно встановлено!")
+    except Exception as e:
+        logging.error(f"❌ Помилка встановлення Webhook: {e}")
+
+async def on_shutdown(bot: Bot):
+    logging.info("💤 Вимикаємо бота... закриваємо з'єднання.")
+    await bot.session.close()
 
 def main():
     dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
     app = web.Application()
-    # SimpleRequestHandler відхилятиме всі запити, які не містять секретного токена
+    
+    # Реєструємо API для веб-додатку
+    app.router.add_get('/api/get_order', api_get_order)
+    app.router.add_options('/api/get_order', api_get_order)
+    
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
