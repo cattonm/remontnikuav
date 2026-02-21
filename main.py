@@ -210,6 +210,35 @@ async def api_get_order(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers=headers)
 
+# API ДЛЯ WEBAPP (ЗБЕРЕЖЕННЯ ОНОВЛЕНЬ)
+async def api_save_order(request):
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+    }
+    if request.method == 'OPTIONS':
+        return web.Response(headers=headers)
+        
+    try:
+        data = await request.json()
+        edit_id = data.get("edit_id")
+        user_id = data.get("user_id")
+        
+        if edit_id:
+            if await async_update_row(int(edit_id), data):
+                # Відправляємо повідомлення менеджеру в Телеграм
+                if user_id:
+                    try:
+                        await bot.send_message(chat_id=user_id, text=f"✅ **Заявку оновлено!** (Рядок {edit_id})", parse_mode="Markdown")
+                    except Exception as e:
+                        logging.error(f"Cannot send message: {e}")
+                return web.json_response({"success": True}, headers=headers)
+            else:
+                return web.json_response({"error": "Update failed"}, status=500, headers=headers)
+        return web.json_response({"error": "No edit_id"}, status=400, headers=headers)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, headers=headers)
 # ==========================================
 # КАЛЬКУЛЯТОР ВАРТОСТІ 
 # ==========================================
@@ -620,7 +649,9 @@ def main():
     # Реєструємо API для веб-додатку
     app.router.add_get('/api/get_order', api_get_order)
     app.router.add_options('/api/get_order', api_get_order)
-    
+    app.router.add_post('/api/save_order', api_save_order)      # <-- ДОДАТИ ЦЕ
+    app.router.add_options('/api/save_order', api_save_order)   # <-- ДОДАТИ ЦЕ
+
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
