@@ -44,7 +44,7 @@ def get_all_authorized_users(force_refresh=False):
         auth_data = {}
         for row in records[1:]:
             if len(row) > 0 and row[0]: 
-                clean_id = str(row[0]).strip()
+                clean_id = str(row[0]).strip() 
                 auth_data[clean_id] = {
                     "name": row[1] if len(row) > 1 else "",
                     "username": row[2] if len(row) > 2 else ""
@@ -92,6 +92,7 @@ def is_authorized(user_id):
     data = get_all_authorized_users()
     return str(user_id).strip() in data
 
+# НОВА ФУНКЦІЯ: Очищення кешу
 def clear_auth_cache():
     """Скидає кеш, змушуючи бота перечитати Google Таблицю."""
     global _auth_cache
