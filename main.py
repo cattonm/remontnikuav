@@ -8,6 +8,7 @@ from datetime import datetime
 import asyncio
 import hashlib
 import hmac
+import html
 from urllib.parse import parse_qsl
 
 from aiogram import Bot, Dispatcher, F
@@ -506,18 +507,35 @@ async def process_password_attempts(message: Message):
         add_authorized_user(user_id, message.from_user.full_name, message.from_user.username or "немає_юзернейму")
         try: await message.delete() 
         except: pass
+        
         await message.answer(MSG_AUTH_SUCCESS, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+        
         if user_id != MASTER_ADMIN_ID:
-            log_text = f"🟢 **УСПІШНА АВТОРИЗАЦІЯ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`"
-            try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
-            except: pass
+            # Надійна HTML-екранізація імені та юзернейму
+            safe_name = html.escape(message.from_user.full_name)
+            safe_username = html.escape(message.from_user.username or 'немає')
+            
+            log_text = f"🟢 <b>УСПІШНА АВТОРИЗАЦІЯ</b>\n\n👤 <b>Ім'я:</b> {safe_name}\n🔖 <b>Username:</b> @{safe_username}\n🆔 <b>ID:</b> <code>{user_id}</code>"
+            try: 
+                await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="HTML")
+            except Exception as e: 
+                # Тепер бот не буде мовчати, якщо щось піде не так!
+                logging.error(f"❌ Не вдалося відправити лог адміну: {e}")
     else:
         try: await message.delete() 
         except: pass
+        
         await message.answer(MSG_AUTH_FAIL, parse_mode="Markdown")
-        log_text = f"🔴 **НЕВДАЛА СПРОБА ВХОДУ**\n\n👤 **Ім'я:** {message.from_user.full_name}\n🔖 **Username:** @{message.from_user.username or 'немає'}\n🆔 **ID:** `{user_id}`\n🔑 **Введений текст:** `{message.text}`"
-        try: await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="Markdown")
-        except: pass
+        
+        safe_name = html.escape(message.from_user.full_name)
+        safe_username = html.escape(message.from_user.username or 'немає')
+        safe_text = html.escape(message.text)
+        
+        log_text = f"🔴 <b>НЕВДАЛА СПРОБА ВХОДУ</b>\n\n👤 <b>Ім'я:</b> {safe_name}\n🔖 <b>Username:</b> @{safe_username}\n🆔 <b>ID:</b> <code>{user_id}</code>\n🔑 <b>Введений текст:</b> <code>{safe_text}</code>"
+        try: 
+            await bot.send_message(MASTER_ADMIN_ID, log_text, parse_mode="HTML")
+        except Exception as e: 
+            logging.error(f"❌ Не вдалося відправити лог адміну: {e}")
 
 @dp.callback_query(F.data.startswith("page_"))
 async def change_page(callback: CallbackQuery):
