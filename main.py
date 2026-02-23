@@ -53,20 +53,12 @@ else:
     model = None
 
 # ==========================================
-# 🛡 АРХІТЕКТУРНІ ФІЧІ (КЕШ, RETRY, БЛОКУВАННЯ)
+# БЕЗПЕКА ТА БЛОКУВАННЯ (CONCURRENCY LOCK)
 # ==========================================
 _THROTTLE_CACHE = {}
-_LOCKS = {} 
-_ORDERS_CACHE = {"data": None, "last_updated": 0}
-CACHE_TTL = 300  # Кеш живе 5 хвилин максимум
-
-def invalidate_orders_cache():
-    """Скидає кеш бази при будь-яких змінах."""
-    global _ORDERS_CACHE
-    _ORDERS_CACHE["data"] = None
+_LOCKS = {}
 
 def is_throttled(user_id, action, delay=10):
-    """Захист від спам-кліків."""
     key = f"{user_id}_{action}"
     now = time.time()
     if key in _THROTTLE_CACHE and now - _THROTTLE_CACHE[key] < delay: return True
@@ -74,7 +66,6 @@ def is_throttled(user_id, action, delay=10):
     return False
 
 def validate_telegram_data(init_data: str, bot_token: str):
-    """Банківська крипто-перевірка даних від Telegram Mini App."""
     try:
         parsed_data = dict(parse_qsl(init_data))
         if 'hash' not in parsed_data: return None
@@ -84,159 +75,129 @@ def validate_telegram_data(init_data: str, bot_token: str):
         secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
         calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         if calc_hash == hash_val:
-            return json.loads(parsed_data.get('user', '{}')).get('id')
+            user_data = json.loads(parsed_data.get('user', '{}'))
+            return user_data.get('id')
         return None
     except Exception:
         return None
 
-def retry_sync(max_retries=3, base_delay=1.5):
-    """Декоратор для автоматичних повторів при збоях Google API."""
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(base_delay ** attempt)
-                        logging.warning(f"🔄 Повтор ({attempt+1}/{max_retries}) для {func.__name__} через помилку: {e}")
-                    else:
-                        logging.error(f"❌ Провал {func.__name__} після {max_retries} спроб: {e}")
-                        raise e
-        return wrapper
-    return decorator
-
 # ==========================================
-# ЖУРНАЛ АУДИТУ ТА СИНХРОННІ ОПЕРАЦІЇ GOOGLE SHEETS
+# ЖУРНАЛ АУДИТУ ТА СИНХРОННІ ФУНКЦІЇ G-SHEETS
 # ==========================================
-@retry_sync()
 def _log_action_sync(user_name, action):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
-    try: ws = doc.worksheet("Logs")
-    except gspread.exceptions.WorksheetNotFound:
-        ws = doc.add_worksheet(title="Logs", rows="100", cols="3")
-        ws.append_row(["Дата і Час", "Менеджер", "Дія"])
-    ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_name, action])
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME)
+        try: ws = doc.worksheet("Logs")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = doc.add_worksheet(title="Logs", rows="100", cols="3")
+            ws.append_row(["Дата і Час", "Менеджер", "Дія"])
+        ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_name, action])
+    except: pass
 
 async def async_log_action(user_name, action):
     asyncio.create_task(asyncio.to_thread(_log_action_sync, user_name, action))
 
-@retry_sync()
 def _get_google_sheet():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME).sheet1
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME).sheet1
+    except: return None
 
-@retry_sync()
 def _save_to_sheet_sync(data):
     sheet = _get_google_sheet()
-    c = data.get('client', {})
-    answers = json.dumps(data, ensure_ascii=False)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    area = c.get('area', '0')
-    address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
-    sheet.append_row([timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, ""])
-    invalidate_orders_cache() # Скидаємо кеш
-    return True
+    if not sheet: return False
+    try:
+        c = data.get('client', {})
+        answers = json.dumps(data, ensure_ascii=False)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        area = c.get('area', '0')
+        address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
+        sheet.append_row([timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, ""])
+        return True
+    except: return False
 
-@retry_sync()
 def _update_row_sync(row_id, data):
     sheet = _get_google_sheet()
-    c = data.get('client', {})
-    answers_json = json.dumps(data, ensure_ascii=False)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M") + " (Оновлено)"
-    area = c.get('area', '0')
-    address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
-    row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers_json, ""]
-    cell_list = sheet.range(f'A{row_id}:G{row_id}')
-    for i, val in enumerate(row_data): cell_list[i].value = val
-    sheet.update_cells(cell_list)
-    invalidate_orders_cache() # Скидаємо кеш
-    return True
+    if not sheet: return False
+    try:
+        c = data.get('client', {})
+        answers_json = json.dumps(data, ensure_ascii=False)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M") + " (Оновлено)"
+        area = c.get('area', '0')
+        address_full = f"{c.get('address')} ({area} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
+        row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers_json, ""]
+        cell_list = sheet.range(f'A{row_id}:G{row_id}')
+        for i, val in enumerate(row_data): cell_list[i].value = val
+        sheet.update_cells(cell_list)
+        return True
+    except: return False
 
-@retry_sync()
 def _get_row_data_sync(row_id):
     sheet = _get_google_sheet()
-    return sheet.row_values(row_id) if sheet else None
+    if sheet:
+        try: return sheet.row_values(row_id)
+        except: return None
+    return None
 
-@retry_sync()
 def _delete_row_sync(row_id, user_name):
-    """М'яке видалення з перенесенням у Кошик."""
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME)
-    sheet = doc.sheet1
-    
-    row_data = sheet.row_values(row_id)
-    if row_data:
-        try: trash_ws = doc.worksheet("Кошик")
-        except gspread.exceptions.WorksheetNotFound:
-            trash_ws = doc.add_worksheet(title="Кошик", rows="100", cols="8")
-            trash_ws.append_row(["Час видалення", "Хто видалив", "Створено", "Ім'я", "Телефон", "Тип", "Адреса", "JSON"])
-        delete_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        trash_ws.append_row([delete_time, user_name] + row_data[:6])
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME)
+        sheet = doc.sheet1
         
-    sheet.delete_rows(row_id)
-    invalidate_orders_cache() # Скидаємо кеш
+        row_data = sheet.row_values(row_id)
+        if row_data:
+            try: trash_ws = doc.worksheet("Кошик")
+            except gspread.exceptions.WorksheetNotFound:
+                trash_ws = doc.add_worksheet(title="Кошик", rows="100", cols="8")
+                trash_ws.append_row(["Час видалення", "Хто видалив", "Створено", "Ім'я", "Телефон", "Тип", "Адреса", "JSON"])
+            delete_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            trash_ws.append_row([delete_time, user_name] + row_data[:6])
+            
+        sheet.delete_rows(row_id)
+    except Exception as e: logging.error(f"Delete Error: {e}")
 
-@retry_sync()
 def _save_report_sync(row_id, text):
     sheet = _get_google_sheet()
-    sheet.update_cell(row_id, 7, text)
+    if sheet:
+        try: sheet.update_cell(row_id, 7, text)
+        except: pass
 
 def _get_orders_keyboard_sync(page=1):
-    """Швидка пагінація за допомогою кешування в пам'яті."""
-    global _ORDERS_CACHE
-    now = time.time()
-    
-    # 1. Беремо з кешу, якщо він валідний
-    if _ORDERS_CACHE["data"] is not None and (now - _ORDERS_CACHE["last_updated"]) < CACHE_TTL:
-        data_rows = _ORDERS_CACHE["data"]
-    else:
-        # 2. Якщо кеш порожній або старий - робимо запит до Google
-        @retry_sync()
-        def fetch_rows():
-            sheet = _get_google_sheet()
-            return sheet.get_all_values() if sheet else []
-            
-        try:
-            rows = fetch_rows()
-            if not rows or len(rows) < 2: return None
-            data_rows = rows[1:]
-            _ORDERS_CACHE["data"] = data_rows
-            _ORDERS_CACHE["last_updated"] = now
-        except Exception:
-            return None
+    sheet = _get_google_sheet()
+    if not sheet: return None
+    try:
+        rows = sheet.get_all_values()
+        if not rows or len(rows) < 2: return None
+        data_rows = rows[1:] 
+        per_page = 10
+        total_pages = math.ceil(len(data_rows) / per_page)
+        if page < 1: page = 1
+        if page > total_pages: page = total_pages
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_rows = data_rows[start_idx:end_idx]
 
-    if not data_rows: return None
+        builder = InlineKeyboardBuilder()
+        for i, row in enumerate(page_rows):
+            actual_row_id = start_idx + i + 2 
+            name = row[1] if len(row) > 1 else "Невідомо"
+            phone = row[2] if len(row) > 2 else "..."
+            builder.button(text=f"{name} | {phone}", callback_data=f"view_{actual_row_id}")
 
-    # Будуємо клавіатуру
-    per_page = 10
-    total_pages = math.ceil(len(data_rows) / per_page)
-    if page < 1: page = 1
-    if page > total_pages: page = total_pages
-    
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    page_rows = data_rows[start_idx:end_idx]
-
-    builder = InlineKeyboardBuilder()
-    for i, row in enumerate(page_rows):
-        actual_row_id = start_idx + i + 2 
-        name = row[1] if len(row) > 1 else "Невідомо"
-        phone = row[2] if len(row) > 2 else "..."
-        builder.button(text=f"{name} | {phone}", callback_data=f"view_{actual_row_id}")
-
-    builder.adjust(1)
-    nav_buttons = []
-    if page > 1: nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-    nav_buttons.append(InlineKeyboardButton(text=f"Стор. {page}/{total_pages}", callback_data="ignore"))
-    if page < total_pages: nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
-    
-    if len(data_rows) > per_page: builder.row(*nav_buttons)
-    builder.row(InlineKeyboardButton(text="🔄 Оновити список", callback_data=f"page_{page}"))
-    return builder.as_markup()
+        builder.adjust(1)
+        nav_buttons = []
+        if page > 1: nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton(text=f"Стор. {page}/{total_pages}", callback_data="ignore"))
+        if page < total_pages: nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
+        if len(data_rows) > per_page: builder.row(*nav_buttons)
+        builder.row(InlineKeyboardButton(text="🔄 Оновити список", callback_data=f"page_{page}"))
+        return builder.as_markup()
+    except: return None
 
 async def async_save_to_sheet(data): return await asyncio.to_thread(_save_to_sheet_sync, data)
 async def async_update_row(row_id, data): return await asyncio.to_thread(_update_row_sync, row_id, data)
@@ -249,7 +210,6 @@ async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get
 # ДИНАМІЧНИЙ ПРАЙС-ЛИСТ З GOOGLE SHEETS
 # ==========================================
 _PRICES_CACHE = None
-@retry_sync()
 def _get_prices_sync():
     global _PRICES_CACHE
     if _PRICES_CACHE is not None: return _PRICES_CACHE
@@ -264,32 +224,33 @@ def _get_prices_sync():
         "base_std": [215, 150, 150], "base_shadow": [1000, 400, 400], "base_hidden": [1600, 600, 600],
         "ceil_shadow_add": [500, 0, 0], "ceil_stretch": [300, 390, 390], "ceil_gips": [700, 440, 440]
     }
-    
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
-    try: sheet = doc.worksheet("Прайс")
-    except:
-        sheet = doc.add_worksheet(title="Прайс", rows="100", cols="4")
-        sheet.append_row(["Ключ (НЕ ЗМІНЮВАТИ)", "Робота", "Матеріал_мін", "Матеріал_макс"])
-        sheet.append_rows([[k, v[0], v[1], v[2]] for k, v in DEFAULT_PRICES.items()])
-        _PRICES_CACHE = DEFAULT_PRICES; return DEFAULT_PRICES
-    
-    loaded_prices = {}
-    for row in sheet.get_all_values()[1:]:
-        if len(row) >= 1 and row[0]:
-            k = row[0].strip()
-            w = float(row[1]) if len(row)>1 and row[1].replace('.','',1).isdigit() else 0
-            m1 = float(row[2]) if len(row)>2 and row[2].replace('.','',1).isdigit() else 0
-            m2 = float(row[3]) if len(row)>3 and row[3].replace('.','',1).isdigit() else 0
-            loaded_prices[k] = [w, m1, m2]
-    final_prices = DEFAULT_PRICES.copy(); final_prices.update(loaded_prices)
-    _PRICES_CACHE = final_prices; return final_prices
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+        try: sheet = doc.worksheet("Прайс")
+        except:
+            sheet = doc.add_worksheet(title="Прайс", rows="100", cols="4")
+            sheet.append_row(["Ключ (НЕ ЗМІНЮВАТИ)", "Робота", "Матеріал_мін", "Матеріал_макс"])
+            sheet.append_rows([[k, v[0], v[1], v[2]] for k, v in DEFAULT_PRICES.items()])
+            _PRICES_CACHE = DEFAULT_PRICES; return DEFAULT_PRICES
+        
+        loaded_prices = {}
+        for row in sheet.get_all_values()[1:]:
+            if len(row) >= 1 and row[0]:
+                k = row[0].strip()
+                w = float(row[1]) if len(row)>1 and row[1].replace('.','',1).isdigit() else 0
+                m1 = float(row[2]) if len(row)>2 and row[2].replace('.','',1).isdigit() else 0
+                m2 = float(row[3]) if len(row)>3 and row[3].replace('.','',1).isdigit() else 0
+                loaded_prices[k] = [w, m1, m2]
+        final_prices = DEFAULT_PRICES.copy(); final_prices.update(loaded_prices)
+        _PRICES_CACHE = final_prices; return final_prices
+    except: return DEFAULT_PRICES
 
 async def async_get_prices(): return await asyncio.to_thread(_get_prices_sync)
 
 
 # ==========================================
-# API ДЛЯ WEBAPP
+# API ДЛЯ WEBAPP (З БЛОКУВАННЯМ)
 # ==========================================
 async def api_get_order(request):
     headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Telegram-Init-Data' }
@@ -305,17 +266,17 @@ async def api_get_order(request):
     if str(row_id) in _LOCKS:
         lock = _LOCKS[str(row_id)]
         if lock["expires"] > now and lock["user_id"] != user_id:
-            return web.json_response({"error": f"🔒 Цю заявку зараз редагує {lock['user_name']}! Зачекайте."}, status=423, headers=headers)
+            return web.json_response({"error": f"🔒 Цю заявку зараз редагує {lock['user_name']}! Зачекайте пару хвилин."}, status=423, headers=headers)
             
     if user_id:
         auth_users = get_all_authorized_users()
         user_name = auth_users.get(str(user_id), {}).get("name", "Колега")
         _LOCKS[str(row_id)] = {"user_id": user_id, "user_name": user_name, "expires": now + 600}
     
-    try:
-        row_data = await async_get_row_data(int(row_id))
-        if not row_data: return web.json_response({"error": "Not found"}, status=404, headers=headers)
-        return web.json_response(json.loads(row_data[5]), headers=headers)
+    row_data = await async_get_row_data(int(row_id))
+    if not row_data: return web.json_response({"error": "Not found"}, status=404, headers=headers)
+        
+    try: return web.json_response(json.loads(row_data[5]), headers=headers)
     except Exception as e: return web.json_response({"error": str(e)}, status=500, headers=headers)
 
 async def api_save_order(request):
@@ -347,14 +308,7 @@ async def api_save_order(request):
             asyncio.create_task(background_update())
             return web.json_response({"success": True}, headers=headers)
         else:
-            async def background_create():
-                if await async_save_to_sheet(data):
-                    client_name = data.get('client', {}).get('name', 'Невідомий клієнт')
-                    await async_log_action(manager_name, f"🆕 СТВОРИВ заявку: {client_name}")
-                    try: await bot.send_message(chat_id=user_id, text="✅ **Нову заявку збережено!**", parse_mode="Markdown")
-                    except: pass
-            asyncio.create_task(background_create())
-            return web.json_response({"success": True}, headers=headers)
+            return web.json_response({"error": "New orders must use tg.sendData"}, status=400, headers=headers)
             
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers=headers)
@@ -367,6 +321,7 @@ def calculate_budget(data_json, PRICES):
     client = data_json.get("client", {})
     answers = data_json.get("answers", {})
     measurements = answers.get("measurements", {})
+    
     total_area = float(client.get("area", 0) or 0)
     floor = int(client.get("floor", 1) or 1)
     elevator = client.get("elevator", "Немає")
@@ -422,6 +377,7 @@ def calculate_budget(data_json, PRICES):
         if not is_bath:
             f_type = answers.get(f"{prefix}_floor", "")
             if isinstance(f_type, dict): f_type = f_type.get("type", "")
+            
             p_floor = [0,0,0]
             if "Ламінат" in f_type: p_floor = PRICES["room_lam"]
             elif "Кварц" in f_type: p_floor = PRICES["room_quartz"]
@@ -489,7 +445,6 @@ async def cmd_reload_cache(message: Message):
     except: pass
     if message.from_user.id != MASTER_ADMIN_ID: return
     clear_auth_cache()
-    invalidate_orders_cache()
     global _PRICES_CACHE
     _PRICES_CACHE = None
     await message.answer("🔄 **Кеш успішно очищено!**\nБот оновив ціни і перечитав доступи.", parse_mode="Markdown")
@@ -500,7 +455,6 @@ async def cmd_backup(message: Message):
     except: pass
     if message.from_user.id != MASTER_ADMIN_ID: return
     await message.answer("⏳ Збираю дані для резервної копії...")
-    @retry_sync()
     def _get_csv():
         sheet = _get_google_sheet()
         if not sheet: return None
@@ -535,7 +489,7 @@ async def revoke_access(callback: CallbackQuery):
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED, parse_mode="Markdown")
-    if is_throttled(message.from_user.id, "admin", delay=2): return
+    await message.answer("⏳ Завантажую базу даних...")
     kb = await async_get_orders_keyboard(page=1)
     if kb: await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
     else: await message.answer("📭 Список заявок порожній.")
@@ -569,17 +523,13 @@ async def change_page(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     page = int(callback.data.split("_")[1])
     kb = await async_get_orders_keyboard(page=page)
-    try: await callback.message.edit_text("📂 **Список заявок:**" if kb else "📭 Порожньо.", reply_markup=kb)
-    except: pass # Ігноруємо помилку "Message is not modified"
-    await callback.answer()
+    await callback.message.edit_text("📂 **Список заявок:**" if kb else "📭 Порожньо.", reply_markup=kb)
 
 @dp.callback_query(F.data == "show_list")
 async def show_first_page(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
     kb = await async_get_orders_keyboard(page=1)
-    try: await callback.message.edit_text("📂 **Список заявок:**" if kb else "📭 Порожньо.", reply_markup=kb)
-    except: pass
-    await callback.answer()
+    await callback.message.edit_text("📂 **Список заявок:**" if kb else "📭 Порожньо.", reply_markup=kb)
 
 @dp.callback_query(F.data == "ignore")
 async def ignore_callback(callback: CallbackQuery): await callback.answer()
@@ -635,20 +585,14 @@ async def generate_report_action(callback: CallbackQuery):
         if not row_data: return await callback.message.answer("Помилка завантаження даних.")
         raw_answers = row_data[5] if len(row_data) > 5 else "{}"
         if model:
-            async def call_gemini():
-                for attempt in range(3):
-                    try: return await asyncio.to_thread(model.generate_content, GEMINI_PROMPT.format(raw_answers=raw_answers))
-                    except Exception: await asyncio.sleep(1.5 ** attempt)
-                raise Exception("Gemini API Error")
-            
-            response = await call_gemini()
+            prompt = GEMINI_PROMPT.format(raw_answers=raw_answers)
+            response = await asyncio.to_thread(model.generate_content, prompt)
             report_text = response.text.replace("```html", "").replace("```", "").strip()
             report_text = re.sub(r'<br\s*/?>', '\n', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'</?ul>', '', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'<li>', '- ', report_text, flags=re.IGNORECASE)
             report_text = re.sub(r'</li>', '\n', report_text, flags=re.IGNORECASE)
             report_text = report_text.replace("**", "").replace("*", "")
-            
             await async_save_report(row_id, report_text)
             kb = InlineKeyboardBuilder()
             kb.button(text="🔙 Назад до заявки", callback_data=f"view_{row_id}")
@@ -702,7 +646,6 @@ async def run_calculation(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
     if not is_authorized(callback.from_user.id): return await callback.answer(MSG_ACCESS_DENIED_ALERT, show_alert=True)
-    if is_throttled(callback.from_user.id, "del", delay=3): return await callback.answer()
     row_id = int(callback.data.split("_")[1])
     try:
         await async_delete_row(row_id, callback.from_user.full_name)
@@ -711,6 +654,18 @@ async def delete_order(callback: CallbackQuery):
         await callback.message.edit_text("📂 **Список заявок:**" if kb else "📭 Порожньо.", reply_markup=kb)
         await async_log_action(callback.from_user.full_name, f"🗑 ВИДАЛИВ заявку (Рядок {row_id} перенесено в Кошик)")
     except Exception as e: await callback.answer(f"Помилка: {e}", show_alert=True)
+
+# ПОВЕРНУТО ОБРОБНИК ДЛЯ НОВИХ ЗАЯВОК!
+@dp.message(F.content_type == ContentType.WEB_APP_DATA)
+async def web_app_data_handler(message: Message):
+    if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
+    data = json.loads(message.web_app_data.data)
+    if await async_save_to_sheet(data):
+        await message.answer("✅ **Нову заявку прийнято!**", parse_mode="Markdown")
+        client_name = data.get('client', {}).get('name', 'Невідомий клієнт')
+        await async_log_action(message.from_user.full_name, f"🆕 СТВОРИВ нову заявку: {client_name}")
+    else:
+        await message.answer("⚠️ Помилка збереження. Спробуйте ще раз.")
 
 async def on_startup(bot: Bot):
     try:
