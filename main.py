@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import sys
+import math
 import html
 import time
 import csv
@@ -155,8 +156,7 @@ def _get_orders_keyboard_sync(page=1):
         if not rows or len(rows) < 2: return None
         data_rows = rows[1:] 
         per_page = 10
-        total_pages = math.ceil(len(data_rows) / per_page) # Виправлено імпорт math, хоча math тут є
-        import math # про всяк випадок
+        total_pages = math.ceil(len(data_rows) / per_page)
         if page < 1: page = 1
         if page > total_pages: page = total_pages
         start_idx = (page - 1) * per_page
@@ -188,7 +188,8 @@ _PRICES_CACHE = None
 def _get_prices_sync():
     global _PRICES_CACHE
     if _PRICES_CACHE is not None: return _PRICES_CACHE
-        DEFAULT_PRICES = {
+    # ОСЬ ВОНИ - ІДЕАЛЬНО ВИРІВНЯНІ ЦІНИ
+    DEFAULT_PRICES = {
         "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
         "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
         "electric_wire": [2100, 1000, 2000], "electric_point": [180, 200, 400], "warm_floor_elec": [550, 800, 2000],
