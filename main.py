@@ -148,7 +148,6 @@ def _delete_row_sync(row_id, user_name):
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
         doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)).open(SPREADSHEET_NAME)
         sheet = doc.sheet1
-        
         row_data = sheet.row_values(row_id)
         if row_data:
             try: trash_ws = doc.worksheet("Кошик")
@@ -157,7 +156,6 @@ def _delete_row_sync(row_id, user_name):
                 trash_ws.append_row(["Час видалення", "Хто видалив", "Створено", "Ім'я", "Телефон", "Тип", "Адреса", "JSON"])
             delete_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             trash_ws.append_row([delete_time, user_name] + row_data[:6])
-            
         sheet.delete_rows(row_id)
     except Exception as e: logging.error(f"Delete Error: {e}")
 
@@ -250,7 +248,7 @@ async def async_get_prices(): return await asyncio.to_thread(_get_prices_sync)
 
 
 # ==========================================
-# API ДЛЯ WEBAPP (З БЛОКУВАННЯМ)
+# API ДЛЯ WEBAPP (З БЛОКУВАННЯМ ТА LIVE-КАЛЬКУЛЯТОРОМ)
 # ==========================================
 async def api_get_order(request):
     headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Telegram-Init-Data' }
@@ -309,7 +307,70 @@ async def api_save_order(request):
             return web.json_response({"success": True}, headers=headers)
         else:
             return web.json_response({"error": "New orders must use tg.sendData"}, status=400, headers=headers)
-            
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, headers=headers)
+
+# НОВИЙ ЕНДПОІНТ: ЖИВИЙ КАЛЬКУЛЯТОР ДЛЯ САЙТУ
+async def api_live_calc(request):
+    headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Telegram-Init-Data' }
+    if request.method == 'OPTIONS': return web.Response(headers=headers)
+    
+    try:
+        data_json = await request.json()
+        client = data_json.get("client", {})
+        answers = data_json.get("answers", {})
+        measurements = answers.get("measurements", {})
+        total_area = float(client.get("area", 0) or 0)
+        
+        # АЛГОРИТМ "ВІРТУАЛЬНИХ ПЛОЩ" (Якщо немає точних замірів)
+        virtual_m = {}
+        baths_count = int(answers.get("baths_count", 0) or 0)
+        rooms_count = int(answers.get("rooms_count", 0) or 0)
+        aux_rooms = answers.get("aux_rooms", [])
+        allocated_area = 0
+        
+        # Санвузли (стандарт 4.5 кв.м)
+        for i in range(1, baths_count + 1):
+            key = f"bath_{i}"
+            if key not in measurements or not measurements[key].get("floor"):
+                virtual_m[key] = {"floor": 4.5, "walls": 4.5 * 2.5}
+                allocated_area += 4.5
+            else:
+                virtual_m[key] = measurements[key]
+                allocated_area += float(measurements[key].get("floor", 0) or 0)
+                
+        # Додаткові приміщення
+        aux_map = {"Кухня": ("kitchen", min(15.0, total_area * 0.2)), "Передпокій": ("hallway", min(10.0, total_area * 0.15)), "Балкон": ("balcony", 3.5), "Гардероб": ("wardrobe", 3.5), "Підвал": ("basement", 10.0), "Горище": ("attic", 15.0)}
+        for aux_name, (key, default_area) in aux_map.items():
+            if aux_name in aux_rooms:
+                if key not in measurements or not measurements[key].get("floor"):
+                    virtual_m[key] = {"floor": default_area, "walls": default_area * 2.5}
+                    allocated_area += default_area
+                else:
+                    virtual_m[key] = measurements[key]
+                    allocated_area += float(measurements[key].get("floor", 0) or 0)
+                    
+        # Житлові кімнати (забирають усю площу, що лишилась)
+        remaining = total_area - allocated_area
+        if remaining < 0: remaining = 0
+        for i in range(1, rooms_count + 1):
+            key = f"room_{i}"
+            if key not in measurements or not measurements[key].get("floor"):
+                room_area = remaining / rooms_count if rooms_count > 0 else 0
+                virtual_m[key] = {"floor": room_area, "walls": room_area * 2.5}
+            else:
+                virtual_m[key] = measurements[key]
+                
+        answers["measurements"] = virtual_m
+        data_json["answers"] = answers
+        
+        prices = await async_get_prices()
+        b = calculate_budget(data_json, prices)
+        
+        return web.json_response({
+            "work": b["total_work"],
+            "mat": b["total_mat_min"]
+        }, headers=headers)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers=headers)
 
@@ -655,7 +716,6 @@ async def delete_order(callback: CallbackQuery):
         await async_log_action(callback.from_user.full_name, f"🗑 ВИДАЛИВ заявку (Рядок {row_id} перенесено в Кошик)")
     except Exception as e: await callback.answer(f"Помилка: {e}", show_alert=True)
 
-# ПОВЕРНУТО ОБРОБНИК ДЛЯ НОВИХ ЗАЯВОК!
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
@@ -685,6 +745,11 @@ def main():
     app.router.add_options('/api/get_order', api_get_order)
     app.router.add_post('/api/save_order', api_save_order)
     app.router.add_options('/api/save_order', api_save_order)
+    
+    # Реєстрація ЖИВОГО КАЛЬКУЛЯТОРА
+    app.router.add_post('/api/live_calc', api_live_calc)
+    app.router.add_options('/api/live_calc', api_live_calc)
+    
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
