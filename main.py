@@ -188,16 +188,19 @@ _PRICES_CACHE = None
 def _get_prices_sync():
     global _PRICES_CACHE
     if _PRICES_CACHE is not None: return _PRICES_CACHE
-    DEFAULT_PRICES = {
+        DEFAULT_PRICES = {
         "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
         "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
-        "electric_wire": [1200, 800, 800], "electric_point": [180, 250, 250],
-        "door_entrance": [5000, 15000, 50000], "door_hidden": [30000, 15000, 27000], "door_std": [3650, 8000, 15000],
-        "bath_tile": [3000, 1800, 1800], "bath_install": [4900, 12000, 30000], "bath_tub": [3800, 15000, 80000],
-        "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_keram": [715, 1500, 2500], "room_parket": [850, 2500, 5000],
-        "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_stucco": [2210, 500, 1500],
-        "base_std": [215, 150, 150], "base_shadow": [1000, 400, 400], "base_hidden": [1600, 600, 600],
-        "ceil_shadow_add": [500, 0, 0], "ceil_stretch": [300, 390, 390], "ceil_gips": [700, 440, 440]
+        "electric_wire": [2100, 1000, 2000], "electric_point": [180, 200, 400], "warm_floor_elec": [550, 800, 2000],
+        "door_entrance": [5000, 15000, 50000], "door_hidden": [3000, 15000, 27000], "door_std": [3650, 8000, 15000],
+        "bath_tile": [3000, 1800, 1800], "toilet": [4900, 12000, 30000], "bath_tub": [5000, 15000, 80000],
+        "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_keram": [715, 1500, 2500], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
+        "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_stucco": [1000, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1000, 2500],
+        "base_std": [215, 115, 200], "base_shadow": [1600, 400, 800], "base_hidden": [1600, 600, 600],
+        "ceil_shadow_add": [500, 0, 0], "ceil_stretch": [300, 390, 390], "ceil_gips": [700, 440, 440],
+        "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
+        "boiler": [2800, 8000, 25000], "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1500, 3000, 12000], "mirror_led": [800, 1500, 12000],
+        "tech_washer": [1000, 15000, 40000], "tech_kitchen": [1000, 10000, 30000], "sink_cabinet": [1600, 10000, 40000], "hand_sink": [1000, 2000, 15000]
     }
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
