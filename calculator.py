@@ -83,23 +83,15 @@ def calculate_budget(data_json, PRICES):
     sockets += rooms_count * 8
     sockets += baths_count * 4
     
-    # Тепла підлога (складний підрахунок площі)
+    # Тепла підлога (Жорстко 50% від загальної площі)
     wf_type = answers.get('warm_floor_type', 'Немає')
     if wf_type != 'Немає':
+        wf_area = total_area * 0.5
+        
+        # Рахуємо терморегулятори (по 1 точці на кожну обрану зону)
         wf_zones = answers.get('warm_floor_zones', [])
-        wf_area = 0
-        z_map = {"Кухня": "kitchen", "Передпокій": "hallway", "Балкон": "balcony", "Гардероб": "wardrobe", "Підвал": "basement", "Горище": "attic"}
-        for z in wf_zones:
-            if z == "Не потребується": continue
-            zid = z_map.get(z, "")
-            if "Кімната" in z: zid = f"room_{z.split(' ')[1]}"
-            elif "Санвузол" in z: zid = f"bath_{z.split(' ')[1]}"
-            
-            sq = get_sq(zid, "floor")
-            if "bath" in zid: sq = max(0, sq - 1.5)
-            elif "kitchen" in zid: sq = sq * 0.7
-            wf_area += sq
-            sockets += 1
+        valid_zones = [z for z in wf_zones if z != "Не потребується"]
+        sockets += max(1, len(valid_zones))
             
         prices_key = "warm_floor_elec" if wf_type == "Електрична" else "warm_floor_water"
         costs["electric"][0] += wf_area * PRICES[prices_key][0]
