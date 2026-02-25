@@ -33,7 +33,6 @@ def apply_virtual_measurements(data_json):
     return data
 
 def get_tier_price(base_price_tuple, tier_str):
-    """Повертає ціну матеріалу на основі вибраного рівня: [rob, mat_min, mat_max]."""
     mat_min = base_price_tuple[1]
     mat_max = base_price_tuple[2]
     if not tier_str or tier_str == "-" or tier_str == "Standard" or tier_str == "S": return mat_min
@@ -83,20 +82,15 @@ def calculate_budget(data_json, PRICES):
     sockets += rooms_count * 8
     sockets += baths_count * 4
     
-    # Тепла підлога (Жорстко 50% від загальної площі)
-    wf_type = answers.get('warm_floor_type', 'Немає')
-    if wf_type != 'Немає':
+    # Тепла підлога (Строго 50% від площі за тарифом Електро, як домовились)
+    wf_zones = answers.get('warm_floor', [])
+    valid_zones = [z for z in wf_zones if z != "Не потребується"]
+    if valid_zones:
         wf_area = total_area * 0.5
-        
-        # Рахуємо терморегулятори (по 1 точці на кожну обрану зону)
-        wf_zones = answers.get('warm_floor_zones', [])
-        valid_zones = [z for z in wf_zones if z != "Не потребується"]
         sockets += max(1, len(valid_zones))
-            
-        prices_key = "warm_floor_elec" if wf_type == "Електрична" else "warm_floor_water"
-        costs["electric"][0] += wf_area * PRICES[prices_key][0]
-        costs["electric"][1] += wf_area * PRICES[prices_key][1]
-        costs["electric"][2] += wf_area * PRICES[prices_key][2]
+        costs["electric"][0] += wf_area * PRICES["warm_floor_elec"][0]
+        costs["electric"][1] += wf_area * PRICES["warm_floor_elec"][1]
+        costs["electric"][2] += wf_area * PRICES["warm_floor_elec"][2]
 
     # Доп розетки на техніку
     for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Осмос", "Пральна машина", "Сушильна машина", "Бойлер"]:
@@ -125,7 +119,7 @@ def calculate_budget(data_json, PRICES):
         is_bath = "bath" in prefix
         c_cat = "baths" if is_bath else "rooms"
         
-        # Освітлення (Єдине для всіх зон)
+        # Освітлення
         lights = answers.get(f"{prefix}_light", [])
         if "Точкове світло" in lights and floor_sq > 0:
             count = max(1, floor_sq / 2.5)
@@ -137,7 +131,7 @@ def calculate_budget(data_json, PRICES):
         if "LED підсвітка" in lights or "Декор підсвітка" in lights:
             costs[c_cat][0] += 5 * PRICES["light_led"][0]; costs[c_cat][1] += 5 * PRICES["light_led"][1]; costs[c_cat][2] += 5 * PRICES["light_led"][2]
 
-        # Змішувачі (Для ванн та кухні)
+        # Змішувачі
         mix_std = int(answers.get(f"{prefix}_mixer_std", 0) or 0)
         mix_hid = int(answers.get(f"{prefix}_mixer_hidden", 0) or 0)
         if mix_std > 0: costs[c_cat][0] += mix_std * PRICES["mixer_std"][0]; costs[c_cat][1] += mix_std * PRICES["mixer_std"][1]; costs[c_cat][2] += mix_std * PRICES["mixer_std"][2]
