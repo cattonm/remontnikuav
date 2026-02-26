@@ -221,16 +221,16 @@ def calculate_budget(data_json, PRICES):
             if prefix == "balcony":
                 b_other = answers.get("balcony_other", {})
                 if "Утеплення" in b_other: costs["rooms"][0] += floor_sq * 3 * PRICES["balcony_warm"][0]; costs["rooms"][1] += floor_sq * 3 * PRICES["balcony_warm"][1]; costs["rooms"][2] += floor_sq * 3 * PRICES["balcony_warm"][2]
+                if "Робоче місце" in b_other: costs["rooms"][0] += PRICES["balcony_workspace"][0]; costs["rooms"][1] += PRICES["balcony_workspace"][1]; costs["rooms"][2] += PRICES["balcony_workspace"][2]
 
             r_other = answers.get(f"{prefix}_other", {})
             for item, tier in r_other.items():
                 if item == "Кондиціонер": costs["rooms"][0] += PRICES["ac"][0]; m_min, m_max = get_tier_price(PRICES["ac"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Радіатор": costs["rooms"][0] += PRICES["radiator"][0]; m_min, m_max = get_tier_price(PRICES["radiator"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Звукоізоляція": costs["rooms"][0] += wall_sq * PRICES["soundproof"][0]; costs["rooms"][1] += wall_sq * PRICES["soundproof"][1]; costs["rooms"][2] += wall_sq * PRICES["soundproof"][2]
-                elif item == "Штори": costs["rooms"][0] += PRICES["curtains"][0]; costs["rooms"][1] += PRICES["curtains"][1]; costs["rooms"][2] += PRICES["curtains"][2]
                 elif item in ["Посудомийна машина", "Мікрохвильова піч", "Духова шафа"]: costs["rooms"][0] += PRICES["tech_kitchen"][0]; m_min, m_max = get_tier_price(PRICES["tech_kitchen"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Осмос" or item == "Подрібнювач відходів": costs["rooms"][0] += PRICES["tech_osmos"][0]; m_min, m_max = get_tier_price(PRICES["tech_osmos"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
-                elif item == "Підсвітка робочої поверхні": costs["rooms"][0] += PRICES["kitchen_led"][0]; costs["rooms"][1] += PRICES["kitchen_led"][1]; costs["rooms"][2] += PRICES["kitchen_led"][2]
+                elif item == "Підсвітка робочої поверхні": costs["rooms"][0] += PRICES["kitchen_workspace_led"][0]; costs["rooms"][1] += PRICES["kitchen_workspace_led"][1]; costs["rooms"][2] += PRICES["kitchen_workspace_led"][2]
 
     ceil_t = answers.get("ceiling", "")
     if "Натяжна" in ceil_t: costs["rooms"][0] += total_area * PRICES["ceil_stretch"][0]; costs["rooms"][1] += total_area * PRICES["ceil_stretch"][1]; costs["rooms"][2] += total_area * PRICES["ceil_stretch"][2]
