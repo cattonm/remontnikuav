@@ -602,7 +602,6 @@ async def generate_report_action(callback: CallbackQuery):
     try:
         raw_answers = (await async_get_row_data(row_id))[5]
         
-        # Асинхронний виклик Gemini з повторними спробами
         for attempt in range(3):
             try:
                 response = await model.generate_content_async(
@@ -707,8 +706,13 @@ def main():
     
     app = web.Application()
     app.router.add_get('/api/get_order', api_get_order)
+    app.router.add_options('/api/get_order', api_get_order)
+    
     app.router.add_post('/api/save_order', api_save_order)
+    app.router.add_options('/api/save_order', api_save_order)
+    
     app.router.add_post('/api/live_calc', api_live_calc)
+    app.router.add_options('/api/live_calc', api_live_calc)
     
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
