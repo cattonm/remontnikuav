@@ -33,7 +33,6 @@ def apply_virtual_measurements(data_json):
     return data
 
 def get_tier_price(base_price_tuple, tier_str):
-    """Повертає вилку цін матеріалу (mat_min, mat_max) на основі рівня"""
     mat_min = base_price_tuple[1]
     mat_max = base_price_tuple[2]
     if not tier_str or tier_str == "-" or tier_str == "Standard" or tier_str == "S": 
@@ -74,30 +73,23 @@ def calculate_budget(data_json, PRICES):
     
     if answers.get("rough_plaster_done") == "Так":
         walls_area = total_area * 2.5
-        costs["rough"][0] += walls_area * PRICES["rough_plaster"][0]
-        costs["rough"][1] += walls_area * PRICES["rough_plaster"][1]
-        costs["rough"][2] += walls_area * PRICES["rough_plaster"][2]
+        costs["rough"][0] += walls_area * PRICES["rough_plaster"][0]; costs["rough"][1] += walls_area * PRICES["rough_plaster"][1]; costs["rough"][2] += walls_area * PRICES["rough_plaster"][2]
 
     # --- 3. ЕЛЕКТРИКА ТА ОПАЛЕННЯ ---
     sockets = 0
-    if answers.get('kitchen_needed') != 'Ні': sockets += 10
-    if answers.get('hallway_needed') != 'Ні': sockets += 4
     rooms_count = int(answers.get('rooms_count', 0))
     baths_count = int(answers.get('baths_count', 0))
     sockets += rooms_count * 8
     sockets += baths_count * 4
+    sockets += 14 # Кухня + Коридор
     
-    # Тепла підлога (Жорстко 50% від площі)
     wf_zones = answers.get('warm_floor', [])
     valid_zones = [z for z in wf_zones if z != "Не потребується"]
     if valid_zones:
         wf_area = total_area * 0.5
         sockets += max(1, len(valid_zones))
-        costs["electric"][0] += wf_area * PRICES["warm_floor_elec"][0]
-        costs["electric"][1] += wf_area * PRICES["warm_floor_elec"][1]
-        costs["electric"][2] += wf_area * PRICES["warm_floor_elec"][2]
+        costs["electric"][0] += wf_area * PRICES["warm_floor_elec"][0]; costs["electric"][1] += wf_area * PRICES["warm_floor_elec"][1]; costs["electric"][2] += wf_area * PRICES["warm_floor_elec"][2]
 
-    # Доп розетки на техніку
     for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Осмос", "Пральна машина", "Сушильна машина", "Бойлер"]:
         for zone in answers:
             if type(answers[zone]) == dict and tech in answers[zone]: sockets += 1
@@ -105,22 +97,16 @@ def calculate_budget(data_json, PRICES):
     if answers.get("electricity_done") == "Ні":
         costs["electric"][0] += total_area * PRICES["electric_wire"][0]; costs["electric"][1] += total_area * PRICES["electric_wire"][1]; costs["electric"][2] += total_area * PRICES["electric_wire"][2]
     
-    costs["electric"][0] += sockets * PRICES["electric_point"][0]
-    costs["electric"][1] += sockets * PRICES["electric_point"][1]
-    costs["electric"][2] += sockets * PRICES["electric_point"][2]
+    costs["electric"][0] += sockets * PRICES["electric_point"][0]; costs["electric"][1] += sockets * PRICES["electric_point"][1]; costs["electric"][2] += sockets * PRICES["electric_point"][2]
 
     # --- 4. ДВЕРІ ---
     ent_door = answers.get("entrance_door", {})
     if isinstance(ent_door, dict) and ent_door.get("type") and "Ні" not in ent_door.get("type"):
         tier = ent_door.get("tier")
-        if "МДФ" in ent_door.get("type"):
-            costs["doors"][0] += PRICES["door_entrance_mdf"][0]
-            mat_min, mat_max = get_tier_price(PRICES["door_entrance_mdf"], tier)
-        else:
-            costs["doors"][0] += PRICES["door_entrance_armor"][0]
-            mat_min, mat_max = get_tier_price(PRICES["door_entrance_armor"], tier)
-        costs["doors"][1] += mat_min
-        costs["doors"][2] += mat_max
+        pk = "door_entrance_mdf" if "МДФ" in ent_door.get("type") else "door_entrance_armor"
+        costs["doors"][0] += PRICES[pk][0]
+        mat_min, mat_max = get_tier_price(PRICES[pk], tier)
+        costs["doors"][1] += mat_min; costs["doors"][2] += mat_max
     elif isinstance(ent_door, str) and ent_door == "Так":
         costs["doors"][0] += PRICES["door_entrance_mdf"][0]; costs["doors"][1] += PRICES["door_entrance_mdf"][1]; costs["doors"][2] += PRICES["door_entrance_mdf"][2]
 
@@ -137,7 +123,6 @@ def calculate_budget(data_json, PRICES):
         is_bath = "bath" in prefix
         c_cat = "baths" if is_bath else "rooms"
         
-        # Освітлення
         lights = answers.get(f"{prefix}_light", [])
         if "Точкове світло" in lights and floor_sq > 0:
             count = max(1, floor_sq / 2.5)
@@ -149,40 +134,29 @@ def calculate_budget(data_json, PRICES):
         if "LED підсвітка" in lights or "Декор підсвітка" in lights:
             costs[c_cat][0] += 5 * PRICES["light_led"][0]; costs[c_cat][1] += 5 * PRICES["light_led"][1]; costs[c_cat][2] += 5 * PRICES["light_led"][2]
 
-        # Змішувачі
         mix_std = int(answers.get(f"{prefix}_mixer_std", 0) or 0)
         mix_hid = int(answers.get(f"{prefix}_mixer_hidden", 0) or 0)
         if mix_std > 0: costs[c_cat][0] += mix_std * PRICES["mixer_std"][0]; costs[c_cat][1] += mix_std * PRICES["mixer_std"][1]; costs[c_cat][2] += mix_std * PRICES["mixer_std"][2]
         if mix_hid > 0: costs[c_cat][0] += mix_hid * PRICES["mixer_hidden"][0]; costs[c_cat][1] += mix_hid * PRICES["mixer_hidden"][1]; costs[c_cat][2] += mix_hid * PRICES["mixer_hidden"][2]
 
-        # Підлога
         f_type = answers.get(f"{prefix}_floor", "")
         if isinstance(f_type, dict): f_type = f_type.get("type", "")
         if "Мозаїка" in f_type:
-            pk = "tile_floor_mosaic"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "tile_floor_mosaic"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Великоформат" in f_type:
-            pk = "tile_floor_large"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "tile_floor_large"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Керамограніт" in f_type or "Плитка" in f_type:
-            pk = "tile_floor_std"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "tile_floor_std"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Ламінат" in f_type:
-            pk = "room_lam"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "room_lam"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Кварц" in f_type:
-            pk = "room_quartz"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "room_quartz"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Паркет" in f_type:
-            pk = "room_parket"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "room_parket"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
         elif "Лінолеум" in f_type:
-            pk = "linoleum"
-            costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
+            pk = "linoleum"; costs[c_cat][0] += floor_sq * PRICES[pk][0]; costs[c_cat][1] += floor_sq * PRICES[pk][1]; costs[c_cat][2] += floor_sq * PRICES[pk][2]
 
-        # --- САНВУЗОЛ ---
         if is_bath:
-            # Стіни Санвузла (плитка)
             w_type = answers.get(f"{prefix}_wall_tile", "")
             if isinstance(w_type, dict): w_type = w_type.get("type", "")
             pk_w = "tile_wall_std"
@@ -219,7 +193,6 @@ def calculate_budget(data_json, PRICES):
                 elif item == "Пральна машина" or item == "Сушильна машина": costs["baths"][0] += PRICES["tech_washer"][0]; m_min, m_max = get_tier_price(PRICES["tech_washer"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
                 elif item == "Умивальник з тумбою": costs["baths"][0] += PRICES["sink_cabinet"][0]; m_min, m_max = get_tier_price(PRICES["sink_cabinet"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
 
-        # --- ЗВИЧАЙНІ КІМНАТИ ТА ЗОНИ ---
         if not is_bath:
             w_type = answers.get(f"{prefix}_walls", "")
             slopes_len = wall_sq * 0.35
@@ -232,18 +205,19 @@ def calculate_budget(data_json, PRICES):
             costs["rooms"][0] += wall_sq * p_wall[0]; costs["rooms"][1] += wall_sq * p_wall[1]; costs["rooms"][2] += wall_sq * p_wall[2]
             costs["rooms"][0] += slopes_len * p_wall[0]; costs["rooms"][1] += slopes_len * p_wall[1]; costs["rooms"][2] += slopes_len * p_wall[2]
             
-            # Підвіконня
             sill = answers.get(f"{prefix}_sills", "")
             if "Пластик" in sill: costs["rooms"][0] += PRICES["sill_plastic"][0]; costs["rooms"][1] += PRICES["sill_plastic"][1]; costs["rooms"][2] += PRICES["sill_plastic"][2]
             elif "Дерево" in sill: costs["rooms"][0] += PRICES["sill_wood"][0]; costs["rooms"][1] += PRICES["sill_wood"][1]; costs["rooms"][2] += PRICES["sill_wood"][2]
             elif "Камінь" in sill: costs["rooms"][0] += PRICES["sill_stone"][0]; costs["rooms"][1] += PRICES["sill_stone"][1]; costs["rooms"][2] += PRICES["sill_stone"][2]
 
-            # Фартух
             apron = answers.get("kitchen_apron", "")
             if "Керамограніт" in apron: costs["rooms"][0] += PRICES["kitchen_apron"][0]; costs["rooms"][1] += PRICES["kitchen_apron"][1]; costs["rooms"][2] += PRICES["kitchen_apron"][1]
             elif "Матеріал" in apron: costs["rooms"][0] += PRICES["kitchen_apron"][0]; costs["rooms"][1] += PRICES["kitchen_apron"][2]; costs["rooms"][2] += PRICES["kitchen_apron"][2]
+            
+            decor = answers.get(f"{prefix}_decor", "")
+            if decor and "ні" not in decor.lower() and "Ні" not in decor:
+                costs["rooms"][0] += PRICES["wall_decor_panels"][0]; costs["rooms"][1] += PRICES["wall_decor_panels"][1]; costs["rooms"][2] += PRICES["wall_decor_panels"][2]
 
-            # Утеплення балкону
             if prefix == "balcony":
                 b_other = answers.get("balcony_other", {})
                 if "Утеплення" in b_other: costs["rooms"][0] += floor_sq * 3 * PRICES["balcony_warm"][0]; costs["rooms"][1] += floor_sq * 3 * PRICES["balcony_warm"][1]; costs["rooms"][2] += floor_sq * 3 * PRICES["balcony_warm"][2]
@@ -253,24 +227,25 @@ def calculate_budget(data_json, PRICES):
                 if item == "Кондиціонер": costs["rooms"][0] += PRICES["ac"][0]; m_min, m_max = get_tier_price(PRICES["ac"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Радіатор": costs["rooms"][0] += PRICES["radiator"][0]; m_min, m_max = get_tier_price(PRICES["radiator"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Звукоізоляція": costs["rooms"][0] += wall_sq * PRICES["soundproof"][0]; costs["rooms"][1] += wall_sq * PRICES["soundproof"][1]; costs["rooms"][2] += wall_sq * PRICES["soundproof"][2]
-                elif item == "Штори" or item == "Тюль": costs["rooms"][0] += PRICES["curtains"][0]; costs["rooms"][1] += PRICES["curtains"][1]; costs["rooms"][2] += PRICES["curtains"][2]
+                elif item == "Штори": costs["rooms"][0] += PRICES["curtains"][0]; costs["rooms"][1] += PRICES["curtains"][1]; costs["rooms"][2] += PRICES["curtains"][2]
                 elif item in ["Посудомийна машина", "Мікрохвильова піч", "Духова шафа"]: costs["rooms"][0] += PRICES["tech_kitchen"][0]; m_min, m_max = get_tier_price(PRICES["tech_kitchen"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
                 elif item == "Осмос" or item == "Подрібнювач відходів": costs["rooms"][0] += PRICES["tech_osmos"][0]; m_min, m_max = get_tier_price(PRICES["tech_osmos"], tier); costs["rooms"][1] += m_min; costs["rooms"][2] += m_max
-
-            if floor_sq > 0:
-                perimeter = math.sqrt(floor_sq) * 4
-                base_t = answers.get("baseboard", "")
-                p_base = [0,0,0]
-                if "Стандартний" in base_t: p_base = PRICES["base_std"]
-                elif "Тіньовий" in base_t: p_base = PRICES["base_shadow"]
-                elif "Прихований" in base_t: p_base = PRICES["base_hidden"]
-                costs["rooms"][0] += perimeter * p_base[0]; costs["rooms"][1] += perimeter * p_base[1]; costs["rooms"][2] += perimeter * p_base[2]
-                if answers.get("ceiling_shadow") == "Так": costs["rooms"][0] += perimeter * PRICES["ceil_shadow_add"][0]
+                elif item == "Підсвітка робочої поверхні": costs["rooms"][0] += PRICES["kitchen_led"][0]; costs["rooms"][1] += PRICES["kitchen_led"][1]; costs["rooms"][2] += PRICES["kitchen_led"][2]
 
     ceil_t = answers.get("ceiling", "")
-    p_ceil = [0,0,0]
-    if "Натяжна" in ceil_t: p_ceil = PRICES["ceil_stretch"]
-    elif "Гіпсокартон" in ceil_t: p_ceil = PRICES["ceil_gips"]
-    costs["rooms"][0] += total_area * p_ceil[0]; costs["rooms"][1] += total_area * p_ceil[1]; costs["rooms"][2] += total_area * p_ceil[2]
+    if "Натяжна" in ceil_t: costs["rooms"][0] += total_area * PRICES["ceil_stretch"][0]; costs["rooms"][1] += total_area * PRICES["ceil_stretch"][1]; costs["rooms"][2] += total_area * PRICES["ceil_stretch"][2]
+    elif "Гіпсокартон" in ceil_t: costs["rooms"][0] += total_area * PRICES["ceil_gips"][0]; costs["rooms"][1] += total_area * PRICES["ceil_gips"][1]; costs["rooms"][2] += total_area * PRICES["ceil_gips"][2]
+    
+    if answers.get("ceiling_shadow") == "Так":
+        peri = math.sqrt(total_area) * 4
+        costs["rooms"][0] += peri * PRICES["ceil_shadow_add"][0]; costs["rooms"][1] += peri * PRICES["ceil_shadow_add"][1]; costs["rooms"][2] += peri * PRICES["ceil_shadow_add"][2]
+        
+    base_t = answers.get("baseboard", "")
+    if base_t and "Ні" not in base_t:
+        peri = math.sqrt(total_area) * 4
+        if "Стандартний" in base_t: pk = "base_std"
+        elif "Тіньовий" in base_t: pk = "base_shadow"
+        elif "Прихований" in base_t: pk = "base_hidden"
+        costs["rooms"][0] += peri * PRICES[pk][0]; costs["rooms"][1] += peri * PRICES[pk][1]; costs["rooms"][2] += peri * PRICES[pk][2]
     
     return { "total_work": round(sum(c[0] for c in costs.values())), "total_mat_min": round(sum(c[1] for c in costs.values())), "total_mat_max": round(sum(c[2] for c in costs.values())), "sockets": sockets, "costs": costs }
