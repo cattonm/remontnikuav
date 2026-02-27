@@ -12,21 +12,22 @@ def apply_virtual_measurements(data_json):
     rooms_c = int(ans.get("rooms_count", 0) or 0)
     baths_c = int(ans.get("baths_count", 0) or 0)
     
-    used_area = 0
-    if "Передпокій" in aux and not meas.get("hallway"): sq = total_area * 0.10; meas["hallway"] = {"floor": sq, "walls": sq * 2.5}; used_area += sq
-    if "Кухня" in aux and not meas.get("kitchen"): sq = total_area * 0.20; meas["kitchen"] = {"floor": sq, "walls": sq * 2.5}; used_area += sq
+        used_area = 0
+    if "Передпокій" in aux and not meas.get("hallway"): sq = total_area * 0.10; meas["hallway"] = {"floor": sq, "walls": sq * 3}; used_area += sq
+    if "Кухня" in aux and not meas.get("kitchen"): sq = total_area * 0.20; meas["kitchen"] = {"floor": sq, "walls": sq * 3}; used_area += sq
     for i in range(1, baths_c + 1):
-        if not meas.get(f"bath_{i}"): sq = 4.5; meas[f"bath_{i}"] = {"floor": sq, "walls": sq * 2.5}; used_area += sq
-    if "Балкон" in aux and not meas.get("balcony"): sq = 3.5; meas["balcony"] = {"floor": sq, "walls": sq * 2.5}; used_area += sq
-    if "Гардероб" in aux and not meas.get("wardrobe"): sq = 3.5; meas["wardrobe"] = {"floor": sq, "walls": sq * 2.5}; used_area += sq
-    if "Підвал" in aux and not meas.get("basement"): sq = total_area * 0.15; meas["basement"] = {"floor": sq, "walls": sq * 2.5}
-    if "Горище" in aux and not meas.get("attic"): sq = total_area * 0.3; meas["attic"] = {"floor": sq, "walls": sq * 2.5}
+        if not meas.get(f"bath_{i}"): sq = 4.5; meas[f"bath_{i}"] = {"floor": sq, "walls": sq * 3}; used_area += sq
+    if "Балкон" in aux and not meas.get("balcony"): sq = 3.5; meas["balcony"] = {"floor": sq, "walls": sq * 3}; used_area += sq
+    if "Гардероб" in aux and not meas.get("wardrobe"): sq = 3.5; meas["wardrobe"] = {"floor": sq, "walls": sq * 3}; used_area += sq
+    if "Підвал" in aux and not meas.get("basement"): sq = total_area * 0.15; meas["basement"] = {"floor": sq, "walls": sq * 3}
+    if "Горище" in aux and not meas.get("attic"): sq = total_area * 0.3; meas["attic"] = {"floor": sq, "walls": sq * 3}
         
     rem_area = max(0, total_area - used_area)
     if rooms_c > 0:
         room_sq = rem_area / rooms_c
         for i in range(1, rooms_c + 1):
-            if not meas.get(f"room_{i}"): meas[f"room_{i}"] = {"floor": room_sq, "walls": room_sq * 2.5}
+            if not meas.get(f"room_{i}"): meas[f"room_{i}"] = {"floor": room_sq, "walls": room_sq * 3}
+
             
     ans["measurements"] = meas
     data["answers"] = ans
@@ -71,9 +72,10 @@ def calculate_budget(data_json, PRICES):
     
     if answers.get("plumbing_done") == "Ні": costs["rough"][0] += total_area * PRICES["plumbing"][0]; costs["rough"][1] += total_area * PRICES["plumbing"][1]; costs["rough"][2] += total_area * PRICES["plumbing"][2]
     
-    if answers.get("rough_plaster_done") == "Так":
-        walls_area = total_area * 2.5
+        if answers.get("rough_plaster_done") == "Так":
+        walls_area = total_area * 3 # ЗМІНЕНО 2.5 НА 3
         costs["rough"][0] += walls_area * PRICES["rough_plaster"][0]; costs["rough"][1] += walls_area * PRICES["rough_plaster"][1]; costs["rough"][2] += walls_area * PRICES["rough_plaster"][2]
+
 
     # --- 3. ЕЛЕКТРИКА ТА ОПАЛЕННЯ ---
     sockets = 0
