@@ -208,7 +208,7 @@ def calculate_budget(data_json, PRICES):
             sill = answers.get(f"{prefix}_sills", "")
             if "Пластик" in sill: costs["rooms"][0] += PRICES["sill_plastic"][0]; costs["rooms"][1] += PRICES["sill_plastic"][1]; costs["rooms"][2] += PRICES["sill_plastic"][2]
             elif "Дерево" in sill: costs["rooms"][0] += PRICES["sill_wood"][0]; costs["rooms"][1] += PRICES["sill_wood"][1]; costs["rooms"][2] += PRICES["sill_wood"][2]
-            elif "Камінь" in sill: costs["rooms"][0] += PRICES["sill_stone"][0]; costs["rooms"][1] += PRICES["sill_stone"][1]; costs["rooms"][2] += PRICES["sill_stone"][2]
+            elif "камінь" in sill.lower(): costs["rooms"][0] += PRICES["sill_stone"][0]; costs["rooms"][1] += PRICES["sill_stone"][1]; costs["rooms"][2] += PRICES["sill_stone"][2]
 
             apron = answers.get("kitchen_apron", "")
             if "Керамограніт" in apron: costs["rooms"][0] += PRICES["kitchen_apron"][0]; costs["rooms"][1] += PRICES["kitchen_apron"][1]; costs["rooms"][2] += PRICES["kitchen_apron"][1]
