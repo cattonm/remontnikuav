@@ -124,9 +124,28 @@ def _save_to_sheet_sync(data):
         answers = json.dumps(data, ensure_ascii=False)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         address_full = f"{c.get('address')} ({c.get('area', '0')} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
-        sheet.append_row([timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, "", "активна"])
+        row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, "", "активна"]
+        
+        # Надійний метод: Шукаємо останній реальний запис у колонці A (Час), ігноруючи пусті клітинки
+        col_a = sheet.col_values(1)
+        last_real_row = 0
+        for i, val in enumerate(col_a):
+            if val.strip() != "":
+                last_real_row = i + 1
+        
+        next_row = last_real_row + 1
+        
+        if next_row > sheet.row_count:
+            sheet.add_rows(10)
+            
+        # Записуємо жорстко в A-H
+        cell_list = sheet.range(f'A{next_row}:H{next_row}')
+        for i, val in enumerate(row_data):
+            cell_list[i].value = str(val)
+        sheet.update_cells(cell_list)
         return True
-    except:
+    except Exception as e:
+        print(f"Sheet save error: {e}")
         return False
 
 def _update_row_sync(row_id, data):
@@ -188,6 +207,8 @@ def _get_orders_keyboard_sync(page=1):
         if not all_rows or len(all_rows) < 2: return None
         active_rows = []
         for i, row in enumerate(all_rows[1:], start=2):
+            # Ігноруємо порожні рядки або зміщені
+            if not row[0].strip() or len(row) < 2: continue
             status = row[7] if len(row) > 7 else "активна"
             if status == "активна": active_rows.append((i, row))
         
