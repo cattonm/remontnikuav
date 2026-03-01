@@ -51,18 +51,10 @@ def calculate_budget(data_json, PRICES):
     measurements = answers.get("measurements", {})
     
     total_area = float(client.get("area", 0) or 0)
-    floor = int(client.get("floor", 1) or 1)
-    elevator = client.get("elevator", "Немає")
     
     def get_sq(zone_id, key):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
-
-    # --- 1. ЛОГІСТИКА (ВИМКНЕНО) ---
-    # log_w = total_area * PRICES["logistics_base"][0]
-    # if elevator == "Немає" and floor > 1: log_w += (total_area * PRICES["logistics_stair"][0] * floor)
-    # elif elevator == "Пасажирський": log_w += (total_area * PRICES["logistics_elev"][0] * floor)
-    # costs["logistics"][0] += log_w
 
     # --- 2. ЧОРНОВІ РОБОТИ ---
     screed = answers.get("screed_done", "")
@@ -90,7 +82,7 @@ def calculate_budget(data_json, PRICES):
         sockets += max(1, len(valid_zones))
         costs["electric"][0] += wf_area * PRICES["warm_floor_elec"][0]; costs["electric"][1] += wf_area * PRICES["warm_floor_elec"][1]; costs["electric"][2] += wf_area * PRICES["warm_floor_elec"][2]
 
-    for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Осмос", "Пральна машина", "Сушильна машина", "Бойлер"]:
+    for tech in ["Посудомийна машина", "Подрібнювач відходів", "Мікрохвильова піч", "Духова шафа", "Осмос", "Пральна машина", "Сушильна машина", "Бойлер до 100л", "Бойлер непрямого нагріву (до 300л)"]:
         for zone in answers:
             if type(answers[zone]) == dict and tech in answers[zone]: sockets += 1
 
@@ -175,7 +167,7 @@ def calculate_budget(data_json, PRICES):
             tub = answers.get(f"{prefix}_tub", {})
             if tub.get("type") and "Не обл" not in tub.get("type"):
                 m_min, m_max = get_tier_price(PRICES["bath_tub"], tub.get("tier"))
-                work = 7500 if tub.get("tier") in ["P", "Premium"] else PRICES["bath_tub"][0]
+                work = 7500 if "Гідро" in tub.get("type") else PRICES["bath_tub"][0]
                 costs["baths"][0] += work; costs["baths"][1] += m_min; costs["baths"][2] += m_max
                 
             shower = answers.get(f"{prefix}_shower", [])
@@ -186,7 +178,8 @@ def calculate_budget(data_json, PRICES):
 
             b_other = answers.get(f"{prefix}_other", {})
             for item, tier in b_other.items():
-                if item == "Бойлер": costs["baths"][0] += PRICES["boiler"][0]; m_min, m_max = get_tier_price(PRICES["boiler"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
+                if item == "Бойлер до 100л": costs["baths"][0] += PRICES["boiler_100"][0]; m_min, m_max = get_tier_price(PRICES["boiler_100"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
+                elif item == "Бойлер непрямого нагріву (до 300л)": costs["baths"][0] += PRICES["boiler_300"][0]; m_min, m_max = get_tier_price(PRICES["boiler_300"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
                 elif item == "Рушникосушка": costs["baths"][0] += PRICES["towel_dryer"][0]; m_min, m_max = get_tier_price(PRICES["towel_dryer"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
                 elif item == "Гігієнічний душ": costs["baths"][0] += PRICES["hygienic_shower"][0]; m_min, m_max = get_tier_price(PRICES["hygienic_shower"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
                 elif item == "Дзеркало з підсвіткою" or item == "Дзеркало": m_min, m_max = get_tier_price(PRICES["mirror_led"], tier); work = 600 if tier in ['S','Standard','-'] else (1000 if tier in ['C','Comfort'] else 2000); costs["baths"][0] += work; costs["baths"][1] += m_min; costs["baths"][2] += m_max
@@ -202,6 +195,8 @@ def calculate_budget(data_json, PRICES):
             elif "Декоративна" in w_type: p_wall = PRICES["wall_decor"]
             elif "Побілка" in w_type: p_wall = PRICES["whitewash"]
             elif "рейками" in w_type: p_wall = PRICES["wood_rails"]
+            elif "Грунтовка" in w_type: p_wall = PRICES["wall_primer"]
+            
             costs["rooms"][0] += wall_sq * p_wall[0]; costs["rooms"][1] += wall_sq * p_wall[1]; costs["rooms"][2] += wall_sq * p_wall[2]
             costs["rooms"][0] += slopes_len * p_wall[0]; costs["rooms"][1] += slopes_len * p_wall[1]; costs["rooms"][2] += slopes_len * p_wall[2]
             
