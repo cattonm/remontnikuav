@@ -126,7 +126,6 @@ def _save_to_sheet_sync(data):
         address_full = f"{c.get('address')} ({c.get('area', '0')} м² | Пов: {c.get('floor', '1')} | Ліфт: {c.get('elevator', 'Немає')})"
         row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full, answers, "", "активна"]
         
-        # Надійний метод: Шукаємо останній реальний запис у колонці A (Час), ігноруючи пусті клітинки
         col_a = sheet.col_values(1)
         last_real_row = 0
         for i, val in enumerate(col_a):
@@ -138,7 +137,6 @@ def _save_to_sheet_sync(data):
         if next_row > sheet.row_count:
             sheet.add_rows(10)
             
-        # Записуємо жорстко в A-H
         cell_list = sheet.range(f'A{next_row}:H{next_row}')
         for i, val in enumerate(row_data):
             cell_list[i].value = str(val)
@@ -207,7 +205,6 @@ def _get_orders_keyboard_sync(page=1):
         if not all_rows or len(all_rows) < 2: return None
         active_rows = []
         for i, row in enumerate(all_rows[1:], start=2):
-            # Ігноруємо порожні рядки або зміщені
             if not row[0].strip() or len(row) < 2: continue
             status = row[7] if len(row) > 7 else "активна"
             if status == "активна": active_rows.append((i, row))
@@ -259,12 +256,14 @@ def _get_prices_sync():
         "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], "bath_tub": [3800, 15000, 100000], 
         "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
         "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
+        "wall_primer": [55, 0, 0],
         "base_std": [215, 115, 200], "base_shadow": [1435, 400, 800], "base_hidden": [1600, 600, 600],
         "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
         "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
         "kitchen_workspace_led": [1000, 2000, 2000], "balcony_workspace": [1500, 3500, 3500],
         "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
-        "boiler": [2800, 8000, 25000], "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], "mirror_led": [600, 1500, 12000], 
+        "boiler_100": [2800, 10000, 20000], "boiler_300": [5000, 35000, 85000],
+        "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], "mirror_led": [600, 1500, 12000], 
         "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000],
         "sink_cabinet": [1600, 10000, 40000], "mixer_std": [1000, 2000, 6000], "mixer_hidden": [1900, 5000, 25000],
         "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
@@ -471,7 +470,7 @@ async def show_saved_report(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
-    if is_throttled(callback.from_user.id, "generate_tz", delay=12): return await callback.answer("⏳ Зачекайте!", show_alert=True)
+    if is_throttled(callback.fromuser.id, "generate_tz", delay=12): return await callback.answer("⏳ Зачекайте!", show_alert=True)
     row_id = int(callback.data.split("_")[1])
     await callback.message.answer("⏳ **Генеруємо ТЗ...**")
     try:
