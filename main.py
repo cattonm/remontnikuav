@@ -470,7 +470,7 @@ async def show_saved_report(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gen_"))
 async def generate_report_action(callback: CallbackQuery):
-    if is_throttled(callback.fromuser.id, "generate_tz", delay=12): return await callback.answer("⏳ Зачекайте!", show_alert=True)
+    if is_throttled(callback.from_user.id, "generate_tz", delay=12): return await callback.answer("⏳ Зачекайте!", show_alert=True)
     row_id = int(callback.data.split("_")[1])
     await callback.message.answer("⏳ **Генеруємо ТЗ...**")
     try:
