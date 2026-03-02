@@ -187,18 +187,21 @@ def calculate_budget(data_json, PRICES):
                 elif item == "Умивальник з тумбою": costs["baths"][0] += PRICES["sink_cabinet"][0]; m_min, m_max = get_tier_price(PRICES["sink_cabinet"], tier); costs["baths"][1] += m_min; costs["baths"][2] += m_max
 
         if not is_bath:
-            w_type = answers.get(f"{prefix}_walls", "")
+            w_types = answers.get(f"{prefix}_walls", [])
+            if isinstance(w_types, str): w_types = [w_types]
             slopes_len = wall_sq * 0.35
-            p_wall = [0,0,0]
-            if "Шпалери" in w_type: p_wall = PRICES["wall_paper"]
-            elif "Фарбування" in w_type: p_wall = PRICES["wall_paint"]
-            elif "Декоративна" in w_type: p_wall = PRICES["wall_decor"]
-            elif "Побілка" in w_type: p_wall = PRICES["whitewash"]
-            elif "рейками" in w_type: p_wall = PRICES["wood_rails"]
-            elif "Грунтовка" in w_type: p_wall = PRICES["wall_primer"]
             
-            costs["rooms"][0] += wall_sq * p_wall[0]; costs["rooms"][1] += wall_sq * p_wall[1]; costs["rooms"][2] += wall_sq * p_wall[2]
-            costs["rooms"][0] += slopes_len * p_wall[0]; costs["rooms"][1] += slopes_len * p_wall[1]; costs["rooms"][2] += slopes_len * p_wall[2]
+            for w_type in w_types:
+                p_wall = [0,0,0]
+                if "Шпалери" in w_type: p_wall = PRICES["wall_paper"]
+                elif "Фарбування" in w_type: p_wall = PRICES["wall_paint"]
+                elif "Декоративна" in w_type: p_wall = PRICES["wall_decor"]
+                elif "Побілка" in w_type: p_wall = PRICES["whitewash"]
+                elif "рейками" in w_type: p_wall = PRICES["wood_rails"]
+                elif "Грунтовка" in w_type: p_wall = PRICES["wall_primer"]
+                
+                costs["rooms"][0] += wall_sq * p_wall[0]; costs["rooms"][1] += wall_sq * p_wall[1]; costs["rooms"][2] += wall_sq * p_wall[2]
+                costs["rooms"][0] += slopes_len * p_wall[0]; costs["rooms"][1] += slopes_len * p_wall[1]; costs["rooms"][2] += slopes_len * p_wall[2]
             
             sill = answers.get(f"{prefix}_sills", "")
             if "Пластик" in sill: costs["rooms"][0] += PRICES["sill_plastic"][0]; costs["rooms"][1] += PRICES["sill_plastic"][1]; costs["rooms"][2] += PRICES["sill_plastic"][2]
