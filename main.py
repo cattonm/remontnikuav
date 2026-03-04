@@ -96,7 +96,6 @@ def validate_telegram_data(init_data: str, bot_token: str):
     except:
         return None
 
-# ФУНКЦІЯ АЛЯРМІВ АДМІНУ ПРО ПОМИЛКИ
 async def notify_admin_about_error(context_msg, error_details):
     try:
         text = f"🚨 <b>СИСТЕМНА ПОМИЛКА БОТА</b>\n\n<b>Процес:</b> {context_msg}\n<b>Деталі:</b> <code>{html.escape(str(error_details))}</code>"
@@ -389,16 +388,34 @@ async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_START_AUTH.format(name=message.from_user.first_name), parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     await message.answer(MSG_START_MAIN.format(name=message.from_user.first_name), reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
+# --- ОНОВЛЕНА КОМАНДА /UPD З ПІДТРИМКОЮ ФОТО ТА ВІДЕО ---
 @dp.message(Command("upd"))
 async def send_update_to_group(message: Message):
     if not is_authorized(message.from_user.id): return
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("⚠️ Напишіть текст після команди. Формат:\n`/upd Ваш текст тут`", parse_mode="Markdown")
-    if GROUP_CHAT_ID == "-100XXXXXXXXXX" or not GROUP_CHAT_ID: return await message.answer("⚠️ Спочатку вкажіть реальний ID вашої групи у файлі main.py (змінна GROUP_CHAT_ID).")
+    
+    # Витягуємо текст незалежно від того, чи це просто текст, чи опис до фото
+    full_text = message.text or message.caption or ""
+    args = full_text.split(maxsplit=1)
+    content_to_send = args[1] if len(args) > 1 else ""
+    
+    if GROUP_CHAT_ID == "-100XXXXXXXXXX" or not GROUP_CHAT_ID: 
+        return await message.answer("⚠️ Спочатку вкажіть реальний ID вашої групи у файлі main.py (змінна GROUP_CHAT_ID).")
+        
     try:
-        await bot.send_message(chat_id=GROUP_CHAT_ID, text=args[1])
+        if message.photo:
+            await bot.send_photo(chat_id=GROUP_CHAT_ID, photo=message.photo[-1].file_id, caption=content_to_send)
+        elif message.video:
+            await bot.send_video(chat_id=GROUP_CHAT_ID, video=message.video.file_id, caption=content_to_send)
+        elif message.document:
+            await bot.send_document(chat_id=GROUP_CHAT_ID, document=message.document.file_id, caption=content_to_send)
+        else:
+            if not content_to_send:
+                return await message.answer("⚠️ Напишіть текст після команди. Формат:\n`/upd Ваш текст тут`\n*(Або прикріпіть фото і напишіть команду в описі)*", parse_mode="Markdown")
+            await bot.send_message(chat_id=GROUP_CHAT_ID, text=content_to_send)
+        
         await message.answer("✅ Повідомлення успішно відправлено в групу!")
-    except Exception as e: await message.answer(f"❌ Помилка: {e}")
+    except Exception as e: 
+        await message.answer(f"❌ Помилка відправки: {e}")
 
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
