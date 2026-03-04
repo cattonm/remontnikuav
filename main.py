@@ -256,7 +256,7 @@ def _get_prices_sync():
         "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], "bath_tub": [3800, 15000, 100000], 
         "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
         "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
-        "wall_primer": [55, 0, 0],
+        "wall_primer": [55, 0, 0], "wall_vagonka": [1200, 1500, 1500], "wall_koroid": [600, 250, 250],
         "base_std": [215, 115, 200], "base_shadow": [1435, 400, 800], "base_hidden": [1600, 600, 600],
         "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
         "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
@@ -269,7 +269,10 @@ def _get_prices_sync():
         "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
         "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
         "light_point": [250, 300, 800], "light_chandelier": [750, 3500, 3500], "light_track": [780, 1450, 3600], "light_led": [390, 0, 0],
-        "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000]
+        "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000],
+        "demo_door_ent": [1200, 0, 0], "demo_door_int": [500, 0, 0], "demo_walls": [400, 0, 0], 
+        "build_gkl": [1100, 600, 600], "build_brick": [1100, 1000, 1000], "build_gazoblok": [850, 600, 600],
+        "demo_floor_wood": [250, 0, 0], "demo_floor_lin": [120, 0, 0], "demo_screed": [320, 0, 0]
     }
     
     try:
@@ -502,7 +505,7 @@ async def run_calculation(callback: CallbackQuery):
         b = calculate_budget(data_json, prices)
         c = b["costs"]
         text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС**\n\n"
-        if c["rough"][0] > 0: text += f"🧱 **Чорнові роботи:**\nРобота: {c['rough'][0]:,.0f} ₴ | Матеріали: ~{c['rough'][1]:,.0f} ₴\n\n"
+        if c["rough"][0] > 0: text += f"🧱 **Чорнові та Демонтаж:**\nРобота: {c['rough'][0]:,.0f} ₴ | Матеріали: ~{c['rough'][1]:,.0f} ₴\n\n"
         text += f"⚡️ **Електрика:**\nРобота: {c['electric'][0]:,.0f} ₴ | Матеріали: ~{c['electric'][1]:,.0f} ₴\n\n"
         if c["doors"][0] > 0: text += f"🚪 **Двері:**\nРобота: {c['doors'][0]:,.0f} ₴ | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} ₴\n\n"
         text += f"🛋 **Оздоблення кімнат:**\nРобота: {c['rooms'][0]:,.0f} ₴ | Матеріали: {c['rooms'][1]:,.0f} - {c['rooms'][2]:,.0f} ₴\n\n"
