@@ -56,6 +56,29 @@ def calculate_budget(data_json, PRICES):
         try: return float(measurements.get(zone_id, {}).get(key, 0))
         except: return 0.0
 
+    # --- 1. ДЕМОНТАЖ ТА ПЕРЕПЛАНУВАННЯ ---
+    if answers.get("demo_entrance") == "Так":
+        costs["rough"][0] += PRICES["demo_door_ent"][0]
+    
+    demo_int_doors = float(answers.get("demo_interior", 0) or 0)
+    costs["rough"][0] += demo_int_doors * PRICES["demo_door_int"][0]
+
+    demo_walls_data = answers.get("demo_build_walls", {})
+    if isinstance(demo_walls_data, dict):
+        costs["rough"][0] += float(demo_walls_data.get("Демонтаж існуючих стін", 0) or 0) * PRICES["demo_walls"][0]
+        gkl = float(demo_walls_data.get("Монтаж: Гіпсокартон", 0) or 0)
+        costs["rough"][0] += gkl * PRICES["build_gkl"][0]; costs["rough"][1] += gkl * PRICES["build_gkl"][1]; costs["rough"][2] += gkl * PRICES["build_gkl"][2]
+        brick = float(demo_walls_data.get("Монтаж: Цегла (1/2)", 0) or 0)
+        costs["rough"][0] += brick * PRICES["build_brick"][0]; costs["rough"][1] += brick * PRICES["build_brick"][1]; costs["rough"][2] += brick * PRICES["build_brick"][2]
+        gaz = float(demo_walls_data.get("Монтаж: Газоблок", 0) or 0)
+        costs["rough"][0] += gaz * PRICES["build_gazoblok"][0]; costs["rough"][1] += gaz * PRICES["build_gazoblok"][1]; costs["rough"][2] += gaz * PRICES["build_gazoblok"][2]
+
+    demo_floor_data = answers.get("demo_floor", {})
+    if isinstance(demo_floor_data, dict):
+        costs["rough"][0] += float(demo_floor_data.get("Паркет / Дерев'яна", 0) or 0) * PRICES["demo_floor_wood"][0]
+        costs["rough"][0] += float(demo_floor_data.get("Лінолеум / Ламінат", 0) or 0) * PRICES["demo_floor_lin"][0]
+        costs["rough"][0] += float(demo_floor_data.get("Стара стяжка", 0) or 0) * PRICES["demo_screed"][0]
+
     # --- 2. ЧОРНОВІ РОБОТИ ---
     screed = answers.get("screed_done", "")
     if "Мокра" in screed: costs["rough"][0] += total_area * PRICES["screed_wet"][0]; costs["rough"][1] += total_area * PRICES["screed_wet"][1]; costs["rough"][2] += total_area * PRICES["screed_wet"][2]
@@ -199,6 +222,8 @@ def calculate_budget(data_json, PRICES):
                 elif "Побілка" in w_type: p_wall = PRICES["whitewash"]
                 elif "рейками" in w_type: p_wall = PRICES["wood_rails"]
                 elif "Грунтовка" in w_type: p_wall = PRICES["wall_primer"]
+                elif "Вагонка" in w_type: p_wall = PRICES["wall_vagonka"]
+                elif "Короїд" in w_type: p_wall = PRICES["wall_koroid"]
                 
                 costs["rooms"][0] += wall_sq * p_wall[0]; costs["rooms"][1] += wall_sq * p_wall[1]; costs["rooms"][2] += wall_sq * p_wall[2]
                 costs["rooms"][0] += slopes_len * p_wall[0]; costs["rooms"][1] += slopes_len * p_wall[1]; costs["rooms"][2] += slopes_len * p_wall[2]
