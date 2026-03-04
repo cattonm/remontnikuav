@@ -33,6 +33,9 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
 SPREADSHEET_NAME = "remonts sheets" 
 
+# 👇👇👇 ТУТ ВПИШИ ID СВОЄЇ ГРУПИ (наприклад: "-1001234567890")
+GROUP_CHAT_ID = "-5265068775"
+
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
 WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
@@ -268,6 +271,7 @@ def _get_prices_sync():
         "sink_cabinet": [1600, 10000, 40000], "mixer_std": [1000, 2000, 6000], "mixer_hidden": [1900, 5000, 25000],
         "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
         "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
+        "balcony_glazing_outer": [1000, 4800, 9000], "balcony_glazing_block": [1500, 4800, 9000],
         "light_point": [250, 300, 800], "light_chandelier": [750, 3500, 3500], "light_track": [780, 1450, 3600], "light_led": [390, 0, 0],
         "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000],
         "demo_door_ent": [1200, 0, 0], "demo_door_int": [500, 0, 0], "demo_walls": [400, 0, 0], 
@@ -372,6 +376,29 @@ def get_main_menu_keyboard():
 async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_START_AUTH.format(name=message.from_user.first_name), parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     await message.answer(MSG_START_MAIN.format(name=message.from_user.first_name), reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+
+# НОВА КОМАНДА ДЛЯ ВІДПРАВКИ ПОВІДОМЛЕНЬ У ГРУПУ
+@dp.message(Command("upd"))
+async def send_update_to_group(message: Message):
+    # Перевіряємо, чи має користувач доступ до бота взагалі
+    if not is_authorized(message.from_user.id):
+        return
+    
+    # Витягуємо текст після команди
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("⚠️ Напишіть текст після команди. Формат:\n`/upd Ваш текст тут`", parse_mode="Markdown")
+        
+    # Перевіряємо, чи не забули вписати ID групи
+    if GROUP_CHAT_ID == "-100XXXXXXXXXX" or not GROUP_CHAT_ID:
+        return await message.answer("⚠️ Спочатку вкажіть реальний ID вашої групи у файлі main.py (змінна GROUP_CHAT_ID).")
+        
+    try:
+        # Відправляємо повідомлення в групу
+        await bot.send_message(chat_id=GROUP_CHAT_ID, text=args[1])
+        await message.answer("✅ Повідомлення успішно відправлено в групу!")
+    except Exception as e:
+        await message.answer(f"❌ Помилка: {e}\n(Можливо, бот не має прав писати в групу або ID вказано невірно)")
 
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
