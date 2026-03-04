@@ -243,8 +243,22 @@ def calculate_budget(data_json, PRICES):
 
             if prefix == "balcony":
                 b_other = answers.get("balcony_other", {})
-                if "Утеплення" in b_other: costs["rooms"][0] += floor_sq * 3 * PRICES["balcony_warm"][0]; costs["rooms"][1] += floor_sq * 3 * PRICES["balcony_warm"][1]; costs["rooms"][2] += floor_sq * 3 * PRICES["balcony_warm"][2]
-                if "Робоче місце" in b_other: costs["rooms"][0] += PRICES["balcony_workspace"][0]; costs["rooms"][1] += PRICES["balcony_workspace"][1]; costs["rooms"][2] += PRICES["balcony_workspace"][2]
+                if "Утеплення" in b_other: 
+                    costs["rooms"][0] += floor_sq * 3 * PRICES["balcony_warm"][0]; costs["rooms"][1] += floor_sq * 3 * PRICES["balcony_warm"][1]; costs["rooms"][2] += floor_sq * 3 * PRICES["balcony_warm"][2]
+                if "Робоче місце" in b_other: 
+                    costs["rooms"][0] += PRICES["balcony_workspace"][0]; costs["rooms"][1] += PRICES["balcony_workspace"][1]; costs["rooms"][2] += PRICES["balcony_workspace"][2]
+                if "Зовнішнє скління" in b_other:
+                    v_sq = float(b_other["Зовнішнє скління"]) if b_other["Зовнішнє скління"] != "Так" else 0
+                    if v_sq > 0:
+                        costs["rooms"][0] += v_sq * PRICES["balcony_glazing_outer"][0]
+                        costs["rooms"][1] += v_sq * PRICES["balcony_glazing_outer"][1]
+                        costs["rooms"][2] += v_sq * PRICES["balcony_glazing_outer"][2]
+                if "Балконний блок" in b_other:
+                    v_sq = float(b_other["Балконний блок"]) if b_other["Балконний блок"] != "Так" else 0
+                    if v_sq > 0:
+                        costs["rooms"][0] += v_sq * PRICES["balcony_glazing_block"][0]
+                        costs["rooms"][1] += v_sq * PRICES["balcony_glazing_block"][1]
+                        costs["rooms"][2] += v_sq * PRICES["balcony_glazing_block"][2]
 
             r_other = answers.get(f"{prefix}_other", {})
             for item, tier in r_other.items():
