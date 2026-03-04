@@ -33,7 +33,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
 SPREADSHEET_NAME = "remonts sheets" 
 
-GROUP_CHAT_ID = "-100XXXXXXXXXX" # Замінити на свій ID групи
+GROUP_CHAT_ID = "-5265068775" # Замінити на свій ID групи
 
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
