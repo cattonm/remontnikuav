@@ -33,8 +33,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
 SPREADSHEET_NAME = "remonts sheets" 
 
-# 👇👇👇 ТУТ ВПИШИ ID СВОЄЇ ГРУПИ (наприклад: "-1001234567890")
-GROUP_CHAT_ID = "-5265068775"
+GROUP_CHAT_ID = "-100XXXXXXXXXX" # Замінити на свій ID групи
 
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000
@@ -97,6 +96,14 @@ def validate_telegram_data(init_data: str, bot_token: str):
     except:
         return None
 
+# ФУНКЦІЯ АЛЯРМІВ АДМІНУ ПРО ПОМИЛКИ
+async def notify_admin_about_error(context_msg, error_details):
+    try:
+        text = f"🚨 <b>СИСТЕМНА ПОМИЛКА БОТА</b>\n\n<b>Процес:</b> {context_msg}\n<b>Деталі:</b> <code>{html.escape(str(error_details))}</code>"
+        await bot.send_message(chat_id=MASTER_ADMIN_ID, text=text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Failed to notify admin: {e}")
+
 def _log_action_sync(user_name, action):
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -121,7 +128,7 @@ def _get_google_sheet():
 
 def _save_to_sheet_sync(data):
     sheet = _get_google_sheet()
-    if not sheet: return False
+    if not sheet: return False, "Неможливо підключитися до Google Таблиці (Можливо, злетіли права або ліміти API)."
     try:
         c = data.get('client', {})
         answers = json.dumps(data, ensure_ascii=False)
@@ -136,7 +143,6 @@ def _save_to_sheet_sync(data):
                 last_real_row = i + 1
         
         next_row = last_real_row + 1
-        
         if next_row > sheet.row_count:
             sheet.add_rows(10)
             
@@ -144,14 +150,14 @@ def _save_to_sheet_sync(data):
         for i, val in enumerate(row_data):
             cell_list[i].value = str(val)
         sheet.update_cells(cell_list)
-        return True
+        return True, ""
     except Exception as e:
         print(f"Sheet save error: {e}")
-        return False
+        return False, str(e)
 
 def _update_row_sync(row_id, data):
     sheet = _get_google_sheet()
-    if not sheet: return False
+    if not sheet: return False, "Неможливо підключитися до Google Таблиці."
     try:
         c = data.get('client', {})
         answers_json = json.dumps(data, ensure_ascii=False)
@@ -164,9 +170,9 @@ def _update_row_sync(row_id, data):
         for i, val in enumerate(row_data):
             cell_list[i].value = val
         sheet.update_cells(cell_list)
-        return True
-    except:
-        return False
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 def _get_row_data_sync(row_id):
     sheet = _get_google_sheet()
@@ -192,7 +198,9 @@ def _delete_row_sync(row_id, user_name):
                 trash_ws = doc.add_worksheet(title="Кошик", rows="100", cols="9")
                 trash_ws.append_row(["Час видалення", "Хто видалив", "Створено", "Ім'я", "Телефон", "Тип", "Адреса", "JSON", "Звіт"])
             trash_ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_name] + row_data[:7])
-    except: pass
+        return True, ""
+    except Exception as e: 
+        return False, str(e)
 
 def _save_report_sync(row_id, text):
     sheet = _get_google_sheet()
@@ -239,7 +247,7 @@ async def async_save_to_sheet(data): return await asyncio.to_thread(_save_to_she
 async def async_update_row(row_id, data): return await asyncio.to_thread(_update_row_sync, row_id, data)
 async def async_get_row_data(row_id): return await asyncio.to_thread(_get_row_data_sync, row_id)
 async def async_save_report(row_id, text): await asyncio.to_thread(_save_report_sync, row_id, text)
-async def async_delete_row(row_id, user_name): await asyncio.to_thread(_delete_row_sync, row_id, user_name)
+async def async_delete_row(row_id, user_name): return await asyncio.to_thread(_delete_row_sync, row_id, user_name)
 async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
 def _get_prices_sync():
@@ -348,16 +356,20 @@ async def api_save_order(request):
         if edit_id:
             existing = await async_get_row_data(int(edit_id))
             if not existing: return web.json_response({"error": "Row not found"}, status=404)
-            success = await async_update_row(int(edit_id), data)
+            success, error_msg = await async_update_row(int(edit_id), data)
             if success:
                 if str(edit_id) in _LOCKS: del _LOCKS[str(edit_id)]
                 await async_log_action(manager_name, f"✏️ Відредагував об'єкт (Рядок {edit_id})")
                 try: await bot.send_message(chat_id=user_id, text=f"✅ **Заявку оновлено!** (Рядок {edit_id})", parse_mode="Markdown")
                 except: pass
                 return web.json_response({"success": True})
-            else: return web.json_response({"error": "Update failed"}, status=500)
+            else: 
+                await notify_admin_about_error(f"Оновлення заявки (ID: {edit_id})", error_msg)
+                return web.json_response({"error": "Update failed"}, status=500)
         return web.json_response({"error": "No edit_id"}, status=400)
-    except Exception as e: return web.json_response({"error": str(e)}, status=500)
+    except Exception as e: 
+        await notify_admin_about_error("API Збереження (Загальна помилка)", e)
+        return web.json_response({"error": str(e)}, status=500)
 
 @cors
 async def api_live_calc(request):
@@ -377,28 +389,16 @@ async def cmd_start(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_START_AUTH.format(name=message.from_user.first_name), parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     await message.answer(MSG_START_MAIN.format(name=message.from_user.first_name), reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
-# НОВА КОМАНДА ДЛЯ ВІДПРАВКИ ПОВІДОМЛЕНЬ У ГРУПУ
 @dp.message(Command("upd"))
 async def send_update_to_group(message: Message):
-    # Перевіряємо, чи має користувач доступ до бота взагалі
-    if not is_authorized(message.from_user.id):
-        return
-    
-    # Витягуємо текст після команди
+    if not is_authorized(message.from_user.id): return
     args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("⚠️ Напишіть текст після команди. Формат:\n`/upd Ваш текст тут`", parse_mode="Markdown")
-        
-    # Перевіряємо, чи не забули вписати ID групи
-    if GROUP_CHAT_ID == "-100XXXXXXXXXX" or not GROUP_CHAT_ID:
-        return await message.answer("⚠️ Спочатку вкажіть реальний ID вашої групи у файлі main.py (змінна GROUP_CHAT_ID).")
-        
+    if len(args) < 2: return await message.answer("⚠️ Напишіть текст після команди. Формат:\n`/upd Ваш текст тут`", parse_mode="Markdown")
+    if GROUP_CHAT_ID == "-100XXXXXXXXXX" or not GROUP_CHAT_ID: return await message.answer("⚠️ Спочатку вкажіть реальний ID вашої групи у файлі main.py (змінна GROUP_CHAT_ID).")
     try:
-        # Відправляємо повідомлення в групу
         await bot.send_message(chat_id=GROUP_CHAT_ID, text=args[1])
         await message.answer("✅ Повідомлення успішно відправлено в групу!")
-    except Exception as e:
-        await message.answer(f"❌ Помилка: {e}\n(Можливо, бот не має прав писати в групу або ID вказано невірно)")
+    except Exception as e: await message.answer(f"❌ Помилка: {e}")
 
 @dp.message(F.text == "Super#secusers")
 async def secret_admin_panel(message: Message):
@@ -547,19 +547,26 @@ async def run_calculation(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_order(callback: CallbackQuery):
     row_id = int(callback.data.split("_")[1])
-    await async_delete_row(row_id, callback.from_user.full_name)
-    await callback.answer("✅ В Кошику!", show_alert=True)
-    await callback.message.edit_text("📂 **Список заявок:**", reply_markup=await async_get_orders_keyboard(1))
-    await async_log_action(callback.from_user.full_name, f"🗑 ВИДАЛИВ заявку (Рядок {row_id})")
+    success, error_msg = await async_delete_row(row_id, callback.from_user.full_name)
+    if success:
+        await callback.answer("✅ В Кошику!", show_alert=True)
+        await callback.message.edit_text("📂 **Список заявок:**", reply_markup=await async_get_orders_keyboard(1))
+        await async_log_action(callback.from_user.full_name, f"🗑 ВИДАЛИВ заявку (Рядок {row_id})")
+    else:
+        await notify_admin_about_error(f"Видалення заявки (ID: {row_id})", error_msg)
+        await callback.answer("⚠️ Помилка видалення!", show_alert=True)
 
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
     data = json.loads(message.web_app_data.data)
-    if await async_save_to_sheet(data):
+    success, error_msg = await async_save_to_sheet(data)
+    if success:
         await message.answer("✅ **Нову заявку прийнято!**", parse_mode="Markdown")
         await async_log_action(message.from_user.full_name, f"🆕 СТВОРИВ нову заявку: {data.get('client', {}).get('name', '')}")
-    else: await message.answer("⚠️ Помилка збереження.")
+    else: 
+        await notify_admin_about_error(f"Збереження заявки від {message.from_user.full_name}", error_msg)
+        await message.answer("⚠️ Помилка збереження. Адміністратора повідомлено.")
 
 async def on_startup(bot: Bot):
     _get_google_sheet()
