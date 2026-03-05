@@ -8,7 +8,6 @@ def apply_virtual_measurements(data):
     return data
 
 def calculate_budget(data, prices):
-    # Додана категорія "custom" для нестандартних робіт
     costs = {
         "rough": [0, 0, 0],
         "electric": [0, 0, 0],
@@ -22,7 +21,6 @@ def calculate_budget(data, prices):
     meas = answers.get("measurements", {})
     client_area = float(data.get("client", {}).get("area", 0) or 0)
 
-    # Допоміжна функція для додавання вартості
     def add_c(category, price_key, multiplier=1.0, tier=None):
         if price_key not in prices:
             return
@@ -60,11 +58,17 @@ def calculate_budget(data, prices):
         if total_walls == 0: total_walls = client_area * 2.5 # fallback
         add_c("rough", "rough_plaster", total_walls)
 
-        screed = answers.get("screed_done")
-    # Беремо введену площу стяжки, якщо її немає (пусто) — беремо загальну client_area
-    screed_area_raw = answers.get("screed_area")
-    screed_area = float(screed_area_raw) if screed_area_raw else client_area
-    
+    screed = answers.get("screed_done")
+    # Безпечне отримання площі стяжки, щоб уникнути помилок ValueError
+    try:
+        screed_area_raw = answers.get("screed_area")
+        if screed_area_raw in [None, "", "0", 0]:
+            screed_area = client_area
+        else:
+            screed_area = float(screed_area_raw)
+    except:
+        screed_area = client_area
+
     if screed == "Потрібна: Мокра": add_c("rough", "screed_wet", screed_area)
     elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", screed_area)
 
@@ -270,7 +274,7 @@ def calculate_budget(data, prices):
                 else:
                     multiplier = float(meas[zone_key].get("walls", 0) or 0)
             else:
-                multiplier = 0.0 # Якщо кімнату видалили, не рахуємо суму
+                multiplier = 0.0
 
         costs["custom"][0] += w_price * multiplier
         costs["custom"][1] += m_price * multiplier
