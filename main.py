@@ -554,6 +554,10 @@ async def run_calculation(callback: CallbackQuery):
         if c["doors"][0] > 0: text += f"🚪 **Двері:**\nРобота: {c['doors'][0]:,.0f} ₴ | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} ₴\n\n"
         text += f"🛋 **Оздоблення кімнат:**\nРобота: {c['rooms'][0]:,.0f} ₴ | Матеріали: {c['rooms'][1]:,.0f} - {c['rooms'][2]:,.0f} ₴\n\n"
         if c["baths"][0] > 0: text += f"🛁 **Санвузли:**\nРобота: {c['baths'][0]:,.0f} ₴ | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} ₴\n\n"
+        
+        if c.get("custom", [0])[0] > 0 or c.get("custom", [0,0,0])[1] > 0: 
+            text += f"⭐️ **НЕСТАНДАРТНІ РОБОТИ:**\nРобота: {c['custom'][0]:,.0f} ₴ | Матеріали: ~{c['custom'][1]:,.0f} ₴\n\n"
+            
         text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n🛠 **Робота:** ~{b['total_work']:,.0f} ₴\n📦 **Матеріали:** від {b['total_mat_min']:,.0f} ₴ до {b['total_mat_max']:,.0f} ₴"
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Назад", callback_data=f"view_{row_id}")
