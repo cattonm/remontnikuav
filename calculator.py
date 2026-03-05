@@ -60,9 +60,13 @@ def calculate_budget(data, prices):
         if total_walls == 0: total_walls = client_area * 2.5 # fallback
         add_c("rough", "rough_plaster", total_walls)
 
-    screed = answers.get("screed_done")
-    if screed == "Потрібна: Мокра": add_c("rough", "screed_wet", client_area)
-    elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", client_area)
+        screed = answers.get("screed_done")
+    # Беремо введену площу стяжки, якщо її немає (пусто) — беремо загальну client_area
+    screed_area_raw = answers.get("screed_area")
+    screed_area = float(screed_area_raw) if screed_area_raw else client_area
+    
+    if screed == "Потрібна: Мокра": add_c("rough", "screed_wet", screed_area)
+    elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", screed_area)
 
     # === 2. ЕЛЕКТРИКА ТА САНТЕХНІКА (electric, rough) ===
     if answers.get("electricity_done") == "Так":
