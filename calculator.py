@@ -1,3 +1,4 @@
+import copy
 import math
 
 def apply_virtual_measurements(data):
