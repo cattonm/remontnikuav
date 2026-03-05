@@ -57,11 +57,12 @@ def calculate_budget(data, prices):
     elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", screed_area)
 
     # === 2. ЕЛЕКТРИКА ТА САНТЕХНІКА ===
-    if answers.get("electricity_done") == "Так":
+        
+    if answers.get("electricity_done") == "Ні":
         add_c("electric", "electric_wire", client_area)
         add_c("electric", "electric_point", client_area * 1.5)
 
-    if answers.get("plumbing_done") == "Так":
+    if answers.get("plumbing_done") == "Ні":
         baths_c = int(answers.get("baths_count", 0) or 0)
         add_c("rough", "plumbing", baths_c * 5 + 3)
 
