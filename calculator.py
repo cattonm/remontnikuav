@@ -24,7 +24,10 @@ def calculate_budget(data, prices):
         m1 = p[1]
         m2 = p[2]
         
-        # Кастомні ціни для "Комфорт" згідно з ТЗ
+        # Очищаємо пробіли, якщо вони випадково "прилетіли" з фронтенду
+        if tier and isinstance(tier, str):
+            tier = tier.strip()
+
         m_c = (m1 + m2) / 2
         overrides_c = {
             "radiator": 6000, "ac": 27000, "bath_tub": 40000,
@@ -37,14 +40,12 @@ def calculate_budget(data, prices):
         }
         if price_key in overrides_c:
             m_c = overrides_c[price_key]
-            
-        # Унікальна логіка для дзеркала (змінюється робота)
+
         if price_key == "mirror_led" and tier:
             if tier == "Стандарт": w = 600
             elif tier == "Комфорт": w = 1000
             elif tier == "Преміум": w = 2000
 
-        # Визначаємо, яку цифру брати для матеріалу
         if tier == "Стандарт":
             costs[category][0] += w * multiplier
             costs[category][1] += m1 * multiplier
@@ -58,7 +59,6 @@ def calculate_budget(data, prices):
             costs[category][1] += m2 * multiplier
             costs[category][2] += m2 * multiplier
         else:
-            # Якщо клас не вказаний, залишаємо "вилку" (мінімум і максимум)
             costs[category][0] += w * multiplier
             costs[category][1] += m1 * multiplier
             costs[category][2] += m2 * multiplier
@@ -96,7 +96,6 @@ def calculate_budget(data, prices):
     elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", screed_area)
 
     # === 2. ЕЛЕКТРИКА ТА САНТЕХНІКА ===
-        
     if answers.get("electricity_done") == "Ні":
         add_c("electric", "electric_wire", client_area)
         add_c("electric", "electric_point", client_area * 1.5)
@@ -109,8 +108,9 @@ def calculate_budget(data, prices):
     ent_door = answers.get("entrance_door") or {}
     if isinstance(ent_door, dict):
         tier = ent_door.get("tier")
-        if ent_door.get("type") == "МДФ": add_c("doors", "door_entrance_mdf", 1, tier)
-        elif ent_door.get("type") == "Броньовані": add_c("doors", "door_entrance_armor", 1, tier)
+        e_type = ent_door.get("type", "")
+        if "Брон" in e_type: add_c("doors", "door_entrance_armor", 1, tier)
+        elif e_type and e_type not in ["Ні", "Немає"]: add_c("doors", "door_entrance_mdf", 1, tier)
 
     int_door = answers.get("interior_door")
     rooms_c = int(answers.get("rooms_count", 0) or 0)
@@ -174,27 +174,27 @@ def calculate_budget(data, prices):
         decor = zone_data.get("decor")
         if decor in ["Панелі гіпсові", "Панелі ДСП", "ДСП панелі"]: add_c(cat, "wall_decor_panels", max(1, int(w_area/4)))
 
+        # РОЗУМНИЙ ПОШУК ДЛЯ "ІНШОГО"
         other = zone_data.get("other") or {}
         for k, v in other.items():
-            # Витягуємо клас (Стандарт/Комфорт/Преміум), якщо він є
-            tier = v if isinstance(v, str) and v in ["Стандарт", "Комфорт", "Преміум"] else None
+            tier = v.strip() if isinstance(v, str) and v.strip() in ["Стандарт", "Комфорт", "Преміум"] else None
             
-            if k == "Радіатор": add_c("rough", "radiator", 1, tier)
-            elif k == "Кондиціонер": add_c("electric", "ac", 1, tier)
-            elif k == "Звукоізоляція": add_c(cat, "soundproof", w_area)
-            elif k == "Утеплення": add_c("rough", "balcony_warm", f_area)
-            elif k == "Робоче місце": add_c(cat, "balcony_workspace", 1)
-            elif k == "Зовнішнє скління": add_c(cat, "balcony_glazing_outer", float(v) if str(v).replace('.','').isdigit() else 1)
-            elif k == "Балконний блок": add_c(cat, "balcony_glazing_block", float(v) if str(v).replace('.','').isdigit() else 1)
-            elif k in ["Посудомийна машина", "Пральна машина", "Сушильна машина"]: add_c(cat, "tech_washer", 1, tier)
-            elif k in ["Осмос", "Подрібнювач"]: add_c(cat, "tech_osmos", 1, tier)
-            elif k in ["Духова шафа", "Мікрохвильова піч"]: add_c(cat, "tech_kitchen", 1, tier)
-            elif k == "Гігієнічний душ": add_c(cat, "hygienic_shower", 1, tier)
-            elif k == "Бойлер до 100л": add_c(cat, "boiler_100", 1, tier)
-            elif k == "Бойлер непрямого нагріву (до 300л)": add_c(cat, "boiler_300", 1, tier)
-            elif k == "Умивальник з тумбою": add_c(cat, "sink_cabinet", 1, tier)
-            elif k in ["Дзеркало з підігрівом", "Дзеркало"]: add_c(cat, "mirror_led", 1, tier)
-            elif k == "Рушникосушка": add_c(cat, "towel_dryer", 1, tier)
+            if "Радіатор" in k: add_c("rough", "radiator", 1, tier)
+            elif "Кондиціонер" in k: add_c("electric", "ac", 1, tier)
+            elif "Звукоізоляція" in k: add_c(cat, "soundproof", w_area)
+            elif "Утеплення" in k: add_c("rough", "balcony_warm", f_area)
+            elif "Робоче місце" in k: add_c(cat, "balcony_workspace", 1)
+            elif "Зовнішнє скління" in k: add_c(cat, "balcony_glazing_outer", float(v) if str(v).replace('.','').isdigit() else 1)
+            elif "Балконний блок" in k: add_c(cat, "balcony_glazing_block", float(v) if str(v).replace('.','').isdigit() else 1)
+            elif any(x in k for x in ["Посудомийн", "Пральн", "Сушильн"]): add_c(cat, "tech_washer", 1, tier)
+            elif any(x in k for x in ["Осмос", "Подрібнювач"]): add_c(cat, "tech_osmos", 1, tier)
+            elif any(x in k for x in ["Духов", "Мікрохвильов"]): add_c(cat, "tech_kitchen", 1, tier)
+            elif "Гігієнічний душ" in k: add_c(cat, "hygienic_shower", 1, tier)
+            elif "Бойлер" in k and "300" in k: add_c(cat, "boiler_300", 1, tier)
+            elif "Бойлер" in k: add_c(cat, "boiler_100", 1, tier)
+            elif "Умивальник" in k or "Раковина" in k: add_c(cat, "sink_cabinet", 1, tier)
+            elif "Дзеркало" in k: add_c(cat, "mirror_led", 1, tier)
+            elif "Рушникосушка" in k: add_c(cat, "towel_dryer", 1, tier)
 
         if zone_data.get("apron") == "Керамограніт": add_c(cat, "kitchen_apron", 3)
         add_c(cat, "mixer_std", float(zone_data.get("mixer_std", 0) or 0))
@@ -206,15 +206,22 @@ def calculate_budget(data, prices):
         if "Скляна перегородка" in shower: add_c(cat, "shower_glass", 1)
         if "Скляна конструкція з дверима" in shower: add_c(cat, "shower_doors", 1)
         
+        # УНІВЕРСАЛЬНИЙ ПОШУК ВАННИ (Будь-яка ванна буде порахована)
         tub = zone_data.get("tub") or {}
-        if isinstance(tub, dict) and tub.get("type") in ["Акрил", "Гідро масаж", "Окремостояча"]: 
-            add_c(cat, "bath_tub", 1, tub.get("tier"))
+        if isinstance(tub, dict):
+            t_type = tub.get("type", "")
+            if t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
+                add_c(cat, "bath_tub", 1, tub.get("tier"))
         
+        # УНІВЕРСАЛЬНИЙ ПОШУК УНІТАЗУ
         toilet = zone_data.get("toilet") or {}
         if isinstance(toilet, dict):
+            t_type = toilet.get("type", "")
             t_tier = toilet.get("tier")
-            if toilet.get("type") == "Окремостоячий": add_c(cat, "toilet_okrem", 1, t_tier)
-            elif toilet.get("type") == "Інсталяція": add_c(cat, "toilet_install", 1, t_tier)
+            if "Інсталяція" in t_type or "Підвісний" in t_type: 
+                add_c(cat, "toilet_install", 1, t_tier)
+            elif t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
+                add_c(cat, "toilet_okrem", 1, t_tier)
 
         sills = zone_data.get("sills")
         if sills == "Пластик": add_c("rooms", "sill_plastic", 1)
