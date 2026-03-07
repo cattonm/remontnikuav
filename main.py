@@ -328,17 +328,23 @@ async def api_get_order(request):
     init_data = request.headers.get('X-Telegram-Init-Data')
     user_id = validate_telegram_data(init_data, BOT_TOKEN) if init_data else None
     if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
-    row_id = request.rel_url.query.get('id')
+    
+    # Виправлено: тепер бекенд шукає edit_id
+    row_id = request.rel_url.query.get('edit_id') 
     if not row_id: return web.json_response({"error": "No ID"}, status=400)
+    
     now = time.time()
     if str(row_id) in _LOCKS:
         lock = _LOCKS[str(row_id)]
         if lock["expires"] > now and lock["user_id"] != user_id:
             return web.json_response({"error": f"🔒 Цю заявку зараз редагує {lock['user_name']}!"}, status=423)
+            
     auth_users = get_all_authorized_users()
     _LOCKS[str(row_id)] = { "user_id": user_id, "user_name": auth_users.get(str(user_id), {}).get("name", "Колега"), "expires": now + 600 }
+    
     row_data = await async_get_row_data(int(row_id))
     if not row_data: return web.json_response({"error": "Not found"}, status=404)
+    
     try: return web.json_response(json.loads(row_data[5]))
     except Exception as e: return web.json_response({"error": str(e)}, status=500)
 
