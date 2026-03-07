@@ -20,14 +20,20 @@ def calculate_budget(data, prices):
     def add_c(category, price_key, multiplier=1.0, tier=None):
         if price_key not in prices: return
         p = prices[price_key]
-        w = p[0]
-        m1 = p[1]
-        m2 = p[2]
+        w = float(p[0])
+        m1 = float(p[1])
+        m2 = float(p[2])
         
-        # Очищаємо пробіли, якщо вони випадково "прилетіли" з фронтенду
+        # 1. СУПЕР-РОЗПІЗНАВАННЯ КЛАСУ (S/C/P)
+        tier_norm = ""
         if tier and isinstance(tier, str):
-            tier = tier.strip()
+            tier_norm = tier.strip().upper()
+        
+        is_std = tier_norm in ["СТАНДАРТ", "S", "С", "STANDARD"]
+        is_comf = tier_norm in ["КОМФОРТ", "C", "К", "COMFORT"]
+        is_prem = tier_norm in ["ПРЕМІУМ", "ПРЕМИУМ", "P", "П", "PREMIUM"]
 
+        # 2. Логіка Комфорту (твої фіксовані ціни)
         m_c = (m1 + m2) / 2
         overrides_c = {
             "radiator": 6000, "ac": 27000, "bath_tub": 40000,
@@ -41,20 +47,22 @@ def calculate_budget(data, prices):
         if price_key in overrides_c:
             m_c = overrides_c[price_key]
 
-        if price_key == "mirror_led" and tier:
-            if tier == "Стандарт": w = 600
-            elif tier == "Комфорт": w = 1000
-            elif tier == "Преміум": w = 2000
+        # 3. Дзеркало (зміна роботи)
+        if price_key == "mirror_led" and tier_norm:
+            if is_std: w = 600
+            elif is_comf: w = 1000
+            elif is_prem: w = 2000
 
-        if tier == "Стандарт":
+        # 4. ФІНАЛЬНА МАТЕМАТИКА
+        if is_std:
             costs[category][0] += w * multiplier
             costs[category][1] += m1 * multiplier
             costs[category][2] += m1 * multiplier
-        elif tier == "Комфорт":
+        elif is_comf:
             costs[category][0] += w * multiplier
             costs[category][1] += m_c * multiplier
             costs[category][2] += m_c * multiplier
-        elif tier == "Преміум":
+        elif is_prem:
             costs[category][0] += w * multiplier
             costs[category][1] += m2 * multiplier
             costs[category][2] += m2 * multiplier
@@ -174,10 +182,10 @@ def calculate_budget(data, prices):
         decor = zone_data.get("decor")
         if decor in ["Панелі гіпсові", "Панелі ДСП", "ДСП панелі"]: add_c(cat, "wall_decor_panels", max(1, int(w_area/4)))
 
-        # РОЗУМНИЙ ПОШУК ДЛЯ "ІНШОГО"
         other = zone_data.get("other") or {}
         for k, v in other.items():
-            tier = v.strip() if isinstance(v, str) and v.strip() in ["Стандарт", "Комфорт", "Преміум"] else None
+            # Витягуємо клас (С/К/П), якщо він є
+            tier = v if isinstance(v, str) else None
             
             if "Радіатор" in k: add_c("rough", "radiator", 1, tier)
             elif "Кондиціонер" in k: add_c("electric", "ac", 1, tier)
@@ -206,14 +214,12 @@ def calculate_budget(data, prices):
         if "Скляна перегородка" in shower: add_c(cat, "shower_glass", 1)
         if "Скляна конструкція з дверима" in shower: add_c(cat, "shower_doors", 1)
         
-        # УНІВЕРСАЛЬНИЙ ПОШУК ВАННИ (Будь-яка ванна буде порахована)
         tub = zone_data.get("tub") or {}
         if isinstance(tub, dict):
             t_type = tub.get("type", "")
             if t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
                 add_c(cat, "bath_tub", 1, tub.get("tier"))
         
-        # УНІВЕРСАЛЬНИЙ ПОШУК УНІТАЗУ
         toilet = zone_data.get("toilet") or {}
         if isinstance(toilet, dict):
             t_type = toilet.get("type", "")
