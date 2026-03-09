@@ -609,18 +609,21 @@ def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     app = web.Application()
+    
+    # Твої існуючі маршрути (по одному разу!)
     app.router.add_get('/api/get_order', api_get_order)
     app.router.add_options('/api/get_order', api_get_order)
     app.router.add_post('/api/save_order', api_save_order)
     app.router.add_options('/api/save_order', api_save_order)
     app.router.add_post('/api/live_calc', api_live_calc)
     app.router.add_options('/api/live_calc', api_live_calc)
-    app.router.add_post('/api/live_calc', api_live_calc)
-    app.router.add_options('/api/live_calc', api_live_calc)
-    # ДОДАЙ ОЦЕЙ РЯДОК:
+    
+    # Наш новий маршрут для бота 24/7
     app.router.add_get('/ping', api_ping)
+    
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": 
+    main()
