@@ -375,7 +375,9 @@ async def api_save_order(request):
     except Exception as e: 
         await notify_admin_about_error("API Збереження (Загальна помилка)", e)
         return web.json_response({"error": str(e)}, status=500)
-
+@cors
+async def api_ping(request):
+    return web.Response(text="Pong! Bot is alive 24/7")
 @cors
 async def api_live_calc(request):
     try:
@@ -613,6 +615,10 @@ def main():
     app.router.add_options('/api/save_order', api_save_order)
     app.router.add_post('/api/live_calc', api_live_calc)
     app.router.add_options('/api/live_calc', api_live_calc)
+    app.router.add_post('/api/live_calc', api_live_calc)
+    app.router.add_options('/api/live_calc', api_live_calc)
+    # ДОДАЙ ОЦЕЙ РЯДОК:
+    app.router.add_get('/ping', api_ping)
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
