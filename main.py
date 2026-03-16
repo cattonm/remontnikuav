@@ -250,20 +250,18 @@ async def async_delete_row(row_id, user_name): return await asyncio.to_thread(_d
 async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
 def _get_prices_sync():
-    global _PRICES_CACHE, _PRICES_CACHE_TIME
-    now = time.time()
-    if _PRICES_CACHE is not None and (now - _PRICES_CACHE_TIME) < _PRICES_CACHE_TTL:
-        return _PRICES_CACHE
-        
+    # ЄДИНЕ ДЖЕРЕЛО ПРАВДИ: Ціни Стандарт (мін) і Преміум (макс)
     DEFAULT_PRICES = {
         "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
         "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
         "rough_plaster": [805, 340, 400], "electric_wire": [2100, 1000, 2000], "electric_point": [180, 100, 200],
-        "warm_floor_elec": [550, 400, 500], "door_entrance_mdf": [4700, 15000, 50000], "door_entrance_armor": [5500, 15000, 50000],
+        "warm_floor_elec": [550, 400, 500], 
+        "door_entrance_mdf": [4700, 15000, 50000], "door_entrance_armor": [5500, 15000, 50000], # Двері: 15к-50к
         "door_hidden": [30000, 15000, 27000], "door_std": [3650, 8000, 15000],
         "tile_floor_mosaic": [2600, 1500, 2500], "tile_floor_std": [1900, 1500, 2500], "tile_floor_large": [3100, 1500, 2500],
         "tile_wall_mosaic": [2800, 1500, 2500], "tile_wall_std": [2100, 1500, 2500], "tile_wall_large": [3300, 1500, 2500],
-        "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], "bath_tub": [3800, 15000, 100000], 
+        "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], # Унітази: 5к-20к / 12к-30к
+        "bath_tub": [3800, 15000, 100000], # Ванна: 15к-100к
         "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
         "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
         "wall_primer": [55, 0, 0], "wall_vagonka": [1200, 1500, 1500], "wall_koroid": [600, 250, 250],
@@ -271,11 +269,14 @@ def _get_prices_sync():
         "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
         "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
         "kitchen_workspace_led": [1000, 2000, 2000], "balcony_workspace": [1500, 3500, 3500],
-        "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
-        "boiler_100": [2800, 10000, 20000], "boiler_300": [5000, 35000, 85000],
-        "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], "mirror_led": [600, 1500, 12000], 
-        "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000],
-        "sink_cabinet": [1600, 10000, 40000], "mixer_std": [1000, 2000, 6000], "mixer_hidden": [1900, 5000, 25000],
+        "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], # Радіатор: 3к-12к / Кондиціонер: 15к-45к
+        "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
+        "boiler_100": [2800, 8000, 25000], "boiler_300": [5000, 8000, 25000], # Бойлер: 8к-25к
+        "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], # Рушникосушка: 3.5к-15к / Гіг.душ: 3к-12к
+        "mirror_led": [600, 1500, 12000], # Дзеркало: 1.5к-12к (робота змінюється в calculator.py)
+        "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000], # Техніка
+        "sink_cabinet": [1600, 10000, 40000], # Умивальник: 10к-40к
+        "mixer_std": [1000, 2000, 15000], "mixer_hidden": [1900, 5000, 25000], # Змішувачі: 2к-15к / 5к-25к
         "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
         "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
         "balcony_glazing_outer": [1000, 4800, 9000], "balcony_glazing_block": [1500, 4800, 9000],
@@ -285,34 +286,7 @@ def _get_prices_sync():
         "build_gkl": [1100, 600, 600], "build_brick": [1100, 1000, 1000], "build_gazoblok": [850, 600, 600],
         "demo_floor_wood": [250, 0, 0], "demo_floor_lin": [120, 0, 0], "demo_screed": [320, 0, 0]
     }
-    
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
-        try: sheet = doc.worksheet("Прайс")
-        except:
-            sheet = doc.add_worksheet(title="Прайс", rows="100", cols="4")
-            sheet.append_row(["Ключ (НЕ ЗМІНЮВАТИ)", "Робота", "Матеріал_мін", "Матеріал_макс"])
-            sheet.append_rows([[k, v[0], v[1], v[2]] for k, v in DEFAULT_PRICES.items()])
-            _PRICES_CACHE = DEFAULT_PRICES
-            _PRICES_CACHE_TIME = now
-            return DEFAULT_PRICES
-        
-        loaded_prices = {}
-        for row in sheet.get_all_values()[1:]:
-            if len(row) >= 1 and row[0]:
-                k = row[0].strip()
-                w = float(row[1]) if len(row)>1 and row[1].replace('.','',1).isdigit() else 0
-                m1 = float(row[2]) if len(row)>2 and row[2].replace('.','',1).isdigit() else 0
-                m2 = float(row[3]) if len(row)>3 and row[3].replace('.','',1).isdigit() else 0
-                loaded_prices[k] = [w, m1, m2]
-        final_prices = DEFAULT_PRICES.copy()
-        final_prices.update(loaded_prices)
-        _PRICES_CACHE = final_prices
-        _PRICES_CACHE_TIME = now
-        return final_prices
-    except:
-        return DEFAULT_PRICES
+    return DEFAULT_PRICES
 
 async def async_get_prices(): return await asyncio.to_thread(_get_prices_sync)
 
