@@ -28,6 +28,8 @@ from security import ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_aut
 from lexicon import GEMINI_PROMPT, MSG_START_AUTH, MSG_START_MAIN, MSG_AUTH_SUCCESS, MSG_AUTH_FAIL, MSG_ACCESS_DENIED, MSG_ACCESS_DENIED_ALERT
 from calculator import calculate_budget, apply_virtual_measurements
 
+from art_curator import art_router
+
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
@@ -582,6 +584,8 @@ async def on_shutdown(bot: Bot): await bot.session.close()
 def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
+
+    dp.include_router(art_router)
     app = web.Application()
     
     # Твої існуючі маршрути (по одному разу!)

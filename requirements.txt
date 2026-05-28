@@ -1,5 +1,6 @@
 aiogram
 aiohttp
+anthropic
 gspread
 oauth2client
 python-dotenv
