@@ -1,21 +1,25 @@
 import math
 
 def apply_virtual_measurements(data):
+    """
+    Залишаємо для сумісності з main.py. 
+    Тут можна реалізувати автогенерацію площ стін, якщо фронтенд передав тільки підлогу.
+    """
     return data
 
 def calculate_budget(data, prices):
     costs = {
-        "rough": [0, 0, 0],
-        "electric": [0, 0, 0],
-        "doors": [0, 0, 0],
-        "rooms": [0, 0, 0],
-        "baths": [0, 0, 0],
-        "custom": [0, 0, 0] 
+        "rough": [0.0, 0.0, 0.0],
+        "electric": [0.0, 0.0, 0.0],
+        "doors": [0.0, 0.0, 0.0],
+        "rooms": [0.0, 0.0, 0.0],
+        "baths": [0.0, 0.0, 0.0],
+        "custom": [0.0, 0.0, 0.0] 
     }
 
     answers = data.get("answers", {})
-    meas = answers.get("measurements", {})
-    client_area = float(data.get("client", {}).get("area", 0) or 0)
+    client_data = data.get("client", {})
+    client_area = float(client_data.get("area", 0) or 0)
 
     def add_c(category, price_key, multiplier=1.0, tier=None):
         if price_key not in prices: return
@@ -24,7 +28,6 @@ def calculate_budget(data, prices):
         m1 = float(p[1])
         m2 = float(p[2])
         
-        # 1. СУПЕР-РОЗПІЗНАВАННЯ КЛАСУ (S/C/P)
         tier_norm = ""
         if tier and isinstance(tier, str):
             tier_norm = tier.strip().upper()
@@ -33,7 +36,6 @@ def calculate_budget(data, prices):
         is_comf = tier_norm in ["КОМФОРТ", "C", "К", "COMFORT"]
         is_prem = tier_norm in ["ПРЕМІУМ", "ПРЕМИУМ", "P", "П", "PREMIUM"]
 
-        # 2. Логіка Комфорту (твої фіксовані ціни)
         m_c = (m1 + m2) / 2
         overrides_c = {
             "radiator": 6000, "ac": 27000, "bath_tub": 40000,
@@ -47,13 +49,11 @@ def calculate_budget(data, prices):
         if price_key in overrides_c:
             m_c = overrides_c[price_key]
 
-        # 3. Дзеркало (зміна роботи)
         if price_key == "mirror_led" and tier_norm:
             if is_std: w = 600
             elif is_comf: w = 1000
             elif is_prem: w = 2000
 
-        # 4. ФІНАЛЬНА МАТЕМАТИКА
         if is_std:
             costs[category][0] += w * multiplier
             costs[category][1] += m1 * multiplier
@@ -71,9 +71,10 @@ def calculate_budget(data, prices):
             costs[category][1] += m1 * multiplier
             costs[category][2] += m2 * multiplier
 
-    # === 1. ДЕМОНТАЖ ТА ЧОРНОВІ ===
+    # === 1. ДЕМОНТАЖ ТА ЧОРНОВІ ВАРІАНТИ ===
     if answers.get("demo_entrance") == "Так": add_c("rough", "demo_door_ent", 1)
-    if int(answers.get("demo_interior", 0) or 0) > 0: add_c("rough", "demo_door_int", int(answers["demo_interior"]))
+    if int(answers.get("demo_interior", 0) or 0) > 0: 
+        add_c("rough", "demo_door_int", int(answers["demo_interior"]))
         
     demo_walls = answers.get("demo_build_walls") or {}
     if demo_walls:
@@ -88,29 +89,33 @@ def calculate_budget(data, prices):
         add_c("rough", "demo_floor_lin", float(demo_floor.get("Лінолеум / Ламінат", 0) or 0))
         add_c("rough", "demo_screed", float(demo_floor.get("Стара стяжка", 0) or 0))
 
-    if answers.get("rough_plaster_done") == "Так":
-        total_walls = sum([float(m.get("walls", 0) or 0) for m in meas.values()])
-        if total_walls == 0: total_walls = client_area * 2.5
-        add_c("rough", "rough_plaster", total_walls)
+    # Рахуємо загальну площу стін динамічно на основі масиву кімнат
+    rooms_list = answers.get("rooms") or []
+    total_walls_area = sum([float(r.get("measurements", {}).get("walls", 0) or 0) for r in rooms_list])
+    
+    if answers.get("rough_plaster_done") == "Ні":
+        if total_walls_area == 0: 
+            total_walls_area = client_area * 2.5
+        add_c("rough", "rough_plaster", total_walls_area)
 
     screed = answers.get("screed_done")
-    try:
-        screed_area_raw = answers.get("screed_area")
-        if screed_area_raw in [None, "", "0", 0]: screed_area = client_area
-        else: screed_area = float(screed_area_raw)
-    except: screed_area = client_area
+    screed_area = float(answers.get("screed_area", 0) or 0)
+    if screed_area <= 0: 
+        screed_area = client_area
 
-    if screed == "Потрібна: Мокра": add_c("rough", "screed_wet", screed_area)
-    elif screed == "Потрібна: Напівсуха": add_c("rough", "screed_dry", screed_area)
+    if "Мокра" in str(screed): add_c("rough", "screed_wet", screed_area)
+    elif "Напівсуха" in str(screed): add_c("rough", "screed_dry", screed_area)
 
-    # === 2. ЕЛЕКТРИКА ТА САНТЕХНІКА ===
+    # === 2. МЕРЕЖІ (ЕЛЕКТРИКА ТА САНТЕХНІКА) ===
     if answers.get("electricity_done") == "Ні":
         add_c("electric", "electric_wire", client_area)
         add_c("electric", "electric_point", client_area * 1.5)
 
     if answers.get("plumbing_done") == "Ні":
         baths_c = int(answers.get("baths_count", 0) or 0)
-        add_c("rough", "plumbing", baths_c * 5 + 3)
+        if baths_c == 0:
+            baths_c = sum([1 for r in rooms_list if r.get("type") == "bath"])
+        add_c("rough", "plumbing", max(1, baths_c) * 5 + 3)
 
     # === 3. ДВЕРІ ===
     ent_door = answers.get("entrance_door") or {}
@@ -124,10 +129,13 @@ def calculate_budget(data, prices):
     rooms_c = int(answers.get("rooms_count", 0) or 0)
     baths_c = int(answers.get("baths_count", 0) or 0)
     door_count = rooms_c + baths_c
+    if door_count == 0:
+        door_count = len(rooms_list)
+        
     if int_door == "Прихований монтаж": add_c("doors", "door_hidden", door_count)
     elif int_door == "Стандарт": add_c("doors", "door_std", door_count)
 
-    # === 4. ЗАГАЛЬНЕ ОЗДОБЛЕННЯ ===
+    # === 4. СТЕЛЯ ТА ПЛІНТУСИ ===
     ceil = answers.get("ceiling")
     if ceil == "Натяжна": add_c("rooms", "ceil_stretch", client_area)
     elif ceil == "Гіпсокартон": add_c("rooms", "ceil_gips", client_area)
@@ -143,14 +151,18 @@ def calculate_budget(data, prices):
     if isinstance(warm_f, list) and len(warm_f) > 0 and "Не потребується" not in warm_f:
         add_c("electric", "warm_floor_elec", len(warm_f) * 5)
 
-    # === 5. КІМНАТИ ТА ПРИМІЩЕННЯ ===
-    def process_room(zone_id, zone_data, is_bath=False):
-        m = meas.get(zone_id) or {}
-        f_area = float(m.get("floor", 0) or 0)
-        w_area = float(m.get("walls", 0) or 0)
+    # === 5. ОБРОБКА ДИНАМІЧНОГО МАСИВУ ПРИМІЩЕНЬ ===
+    for room in rooms_list:
+        r_type = room.get("type", "room")
+        is_bath = (r_type == "bath")
         cat = "baths" if is_bath else "rooms"
         
-        floor = zone_data.get("floor")
+        meas = room.get("measurements") or {}
+        f_area = float(meas.get("floor", 0) or 0)
+        w_area = float(meas.get("walls", 0) or 0)
+        
+        # Підлога
+        floor = room.get("floor")
         if floor == "Керамограніт": add_c(cat, "tile_floor_std", f_area)
         elif floor in ["Кварцвініл", "Кварц-вініл", "Кварц вініл"]: add_c(cat, "room_quartz", f_area)
         elif floor == "Ламінат": add_c(cat, "room_lam", f_area)
@@ -159,7 +171,8 @@ def calculate_budget(data, prices):
         elif floor == "Великоформатний керамограніт": add_c(cat, "tile_floor_large", f_area)
         elif floor == "Мозаїка": add_c(cat, "tile_floor_mosaic", f_area)
         
-        walls = zone_data.get("walls") or []
+        # Стіни
+        walls = room.get("walls") or []
         if "Шпалери" in walls: add_c(cat, "wall_paper", w_area)
         if "Декоративна штукатурка" in walls: add_c(cat, "wall_decor", w_area)
         if "Фарбування" in walls: add_c(cat, "wall_paint", w_area)
@@ -168,25 +181,61 @@ def calculate_budget(data, prices):
         if "Короїд" in walls: add_c(cat, "wall_koroid", w_area)
         if "Обшивка деревʼяними рейками" in walls: add_c(cat, "wood_rails", w_area)
 
-        w_tile = zone_data.get("wall_tile")
+        # Плитка на стінах (для санвузлів)
+        w_tile = room.get("wall_tile")
         if w_tile == "Керамограніт/Плитка до 120*60": add_c(cat, "tile_wall_std", w_area)
         elif w_tile == "Великоформатний керамограніт": add_c(cat, "tile_wall_large", w_area)
         elif w_tile == "Мозаїка": add_c(cat, "tile_wall_mosaic", w_area)
 
-        light = zone_data.get("light") or []
+        # Освітлення
+        light = room.get("light") or []
         if "Точкове світло" in light: add_c("electric", "light_point", max(1, int(f_area/2)))
         if "Люстра" in light: add_c("electric", "light_chandelier", 1)
         if "Трек / Лінія" in light: add_c("electric", "light_track", max(1, int(f_area/3)))
         if "LED підсвітка" in light or "Декор підсвітка" in light: add_c("electric", "light_led", 5)
 
-        decor = zone_data.get("decor")
-        if decor in ["Панелі гіпсові", "Панелі ДСП", "ДСП панелі"]: add_c(cat, "wall_decor_panels", max(1, int(w_area/4)))
+        # Декор
+        decor = room.get("decor")
+        if decor in ["Панелі гіпсові", "Панелі ДСП", "ДСП панелі"]: 
+            add_c(cat, "wall_decor_panels", max(1, int(w_area/4)))
 
-        other = zone_data.get("other") or {}
-        for k, v in other.items():
-            # Витягуємо клас (С/К/П), якщо він є
-            tier = v if isinstance(v, str) else None
+        # Фартух кухні
+        if room.get("apron") == "Керамограніт": add_c(cat, "kitchen_apron", 3)
+        
+        # Змішувачі
+        if room.get("mixer_std"): add_c(cat, "mixer_std", float(room.get("mixer_std", 0)))
+        if room.get("mixer_hidden"): add_c(cat, "mixer_hidden", float(room.get("mixer_hidden", 0)))
+
+        # Сантехніка (Ванна, Душ, Унітаз)
+        shower = room.get("shower") or []
+        if "Піддон (акрил/камінь)" in shower: add_c(cat, "shower_tray", 1)
+        if "Душовий трап (з плитки)" in shower: add_c(cat, "shower_trap", 1)
+        if "Скляна перегородка" in shower: add_c(cat, "shower_glass", 1)
+        if "Скляна конструкція з дверима" in shower: add_c(cat, "shower_doors", 1)
+        
+        tub = room.get("tub") or {}
+        if isinstance(tub, dict) and tub.get("type") not in [None, "Ні", "Немає", "Не потрібно"]:
+            add_c(cat, "bath_tub", 1, tub.get("tier"))
             
+        toilet = room.get("toilet") or {}
+        if isinstance(toilet, dict):
+            t_type = toilet.get("type", "")
+            t_tier = toilet.get("tier")
+            if "Інсталяція" in t_type or "Підвісний" in t_type: 
+                add_c(cat, "toilet_install", 1, t_tier)
+            elif t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
+                add_c(cat, "toilet_okrem", 1, t_tier)
+
+        # Підвіконня
+        sills = room.get("sills")
+        if sills == "Пластик": add_c("rooms", "sill_plastic", 1)
+        elif sills == "Дерево": add_c("rooms", "sill_wood", 1)
+        elif sills == "Штучний камінь": add_c("rooms", "sill_stone", 1)
+
+        # Інше додаткове обладнання (Радіатори, Клімат, Техніка)
+        other = room.get("other") or {}
+        for k, v in other.items():
+            tier = v if isinstance(v, str) else None
             if "Радіатор" in k: add_c("rough", "radiator", 1, tier)
             elif "Кондиціонер" in k: add_c("electric", "ac", 1, tier)
             elif "Звукоізоляція" in k: add_c(cat, "soundproof", w_area)
@@ -204,99 +253,20 @@ def calculate_budget(data, prices):
             elif "Дзеркало" in k: add_c(cat, "mirror_led", 1, tier)
             elif "Рушникосушка" in k: add_c(cat, "towel_dryer", 1, tier)
 
-        if zone_data.get("apron") == "Керамограніт": add_c(cat, "kitchen_apron", 3)
-        add_c(cat, "mixer_std", float(zone_data.get("mixer_std", 0) or 0))
-        add_c(cat, "mixer_hidden", float(zone_data.get("mixer_hidden", 0) or 0))
-
-        shower = zone_data.get("shower") or []
-        if "Піддон (акрил/камінь)" in shower: add_c(cat, "shower_tray", 1)
-        if "Душовий трап (з плитки)" in shower: add_c(cat, "shower_trap", 1)
-        if "Скляна перегородка" in shower: add_c(cat, "shower_glass", 1)
-        if "Скляна конструкція з дверима" in shower: add_c(cat, "shower_doors", 1)
-        
-        tub = zone_data.get("tub") or {}
-        if isinstance(tub, dict):
-            t_type = tub.get("type", "")
-            if t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
-                add_c(cat, "bath_tub", 1, tub.get("tier"))
-        
-        toilet = zone_data.get("toilet") or {}
-        if isinstance(toilet, dict):
-            t_type = toilet.get("type", "")
-            t_tier = toilet.get("tier")
-            if "Інсталяція" in t_type or "Підвісний" in t_type: 
-                add_c(cat, "toilet_install", 1, t_tier)
-            elif t_type and t_type not in ["Ні", "Немає", "Не потрібно"]: 
-                add_c(cat, "toilet_okrem", 1, t_tier)
-
-        sills = zone_data.get("sills")
-        if sills == "Пластик": add_c("rooms", "sill_plastic", 1)
-        elif sills == "Дерево": add_c("rooms", "sill_wood", 1)
-        elif sills == "Штучний камінь": add_c("rooms", "sill_stone", 1)
-
-    for i in range(1, rooms_c + 1):
-        room_data = {
-            "floor": answers.get(f"room_{i}_floor"),
-            "walls": answers.get(f"room_{i}_walls") or [],
-            "light": answers.get(f"room_{i}_light") or [],
-            "sills": answers.get(f"room_{i}_sills"),
-            "decor": answers.get(f"room_{i}_decor"),
-            "other": answers.get(f"room_{i}_other") or {}
-        }
-        process_room(f"room_{i}", room_data)
-
-    for i in range(1, baths_c + 1):
-        bath_data = {
-            "floor": answers.get(f"bath_{i}_floor"),
-            "wall_tile": answers.get(f"bath_{i}_wall_tile"),
-            "shower": answers.get(f"bath_{i}_shower") or [],
-            "tub": answers.get(f"bath_{i}_tub") or {},
-            "toilet": answers.get(f"bath_{i}_toilet") or {},
-            "mixer_std": answers.get(f"bath_{i}_mixer_std"),
-            "mixer_hidden": answers.get(f"bath_{i}_mixer_hidden"),
-            "other": answers.get(f"bath_{i}_other") or {}
-        }
-        process_room(f"bath_{i}", bath_data, is_bath=True)
-
-    aux_map = {"Передпокій": "hallway", "Кухня": "kitchen", "Балкон": "balcony", "Гардероб": "wardrobe", "Підвал": "basement", "Горище": "attic"}
-    aux_rooms = answers.get("aux_rooms") or []
-    for a in aux_rooms:
-        prefix = aux_map.get(a)
-        if prefix:
-            aux_data = {
-                "floor": answers.get(f"{prefix}_floor"),
-                "walls": answers.get(f"{prefix}_walls") or [],
-                "light": answers.get(f"{prefix}_light") or [],
-                "decor": answers.get(f"{prefix}_decor"),
-                "apron": answers.get(f"{prefix}_apron"),
-                "mixer_std": answers.get(f"{prefix}_mixer_std"),
-                "mixer_hidden": answers.get(f"{prefix}_mixer_hidden"),
-                "other": answers.get(f"{prefix}_other") or {}
-            }
-            process_room(prefix, aux_data)
-
     # === 6. НЕСТАНДАРТНІ РОБОТИ ===
     custom_works = answers.get("custom_works") or []
     for cw in custom_works:
         calc_type = cw.get("calc_type", "Фіксована ціна")
         w_price = float(cw.get("work_price", 0) or 0)
         m_price = float(cw.get("mat_price", 0) or 0)
-        zone = cw.get("zone", "Загальні")
+        zone_id = cw.get("zone_id") # зв'язка йде через унікальний id кімнати
         multiplier = 1.0
 
-        if calc_type in ["За м² підлоги", "За м² стін"]:
-            zone_key = None
-            if zone == "Передпокій": zone_key = "hallway"
-            elif zone == "Кухня": zone_key = "kitchen"
-            elif zone == "Балкон": zone_key = "balcony"
-            elif zone == "Гардероб": zone_key = "wardrobe"
-            elif zone == "Підвал": zone_key = "basement"
-            elif zone == "Горище": zone_key = "attic"
-            elif zone.startswith("Кімната"): zone_key = f"room_{zone.split()[1]}"
-            elif zone.startswith("Санвузол"): zone_key = f"bath_{zone.split()[1]}"
-
-            if zone_key and zone_key in meas:
-                multiplier = float(meas[zone_key].get("floor", 0) or 0) if calc_type == "За м² підлоги" else float(meas[zone_key].get("walls", 0) or 0)
+        if calc_type in ["За м² підлоги", "За м² стін"] and zone_id:
+            target_room = next((r for r in rooms_list if r.get("id") == zone_id), None)
+            if target_room:
+                r_meas = target_room.get("measurements", {})
+                multiplier = float(r_meas.get("floor", 0) or 0) if calc_type == "За м² підлоги" else float(r_meas.get("walls", 0) or 0)
             else:
                 multiplier = 0.0
 
@@ -313,4 +283,3 @@ def calculate_budget(data, prices):
         "total_mat_min": total_mat_min,
         "total_mat_max": total_mat_max,
         "costs": costs
-    }
