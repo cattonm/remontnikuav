@@ -1,5 +1,17 @@
 import math
 
+def _num(v, default=0.0):
+    """Безпечний float: '15' → 15.0; '' / None / 'abc' → default.
+    Раніше голий float() на кривому полі кидав ValueError, ендпоінт
+    відповідав 500, а фронтенд МОВЧКИ показував старі (нульові) суми."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+def _int(v, default=0):
+    return int(_num(v, default))
+
 def apply_virtual_measurements(data):
     """
     Залишаємо для сумісності з main.py. 
@@ -19,7 +31,7 @@ def calculate_budget(data, prices):
 
     answers = data.get("answers", {})
     client_data = data.get("client", {})
-    client_area = float(client_data.get("area", 0) or 0)
+    client_area = _num(client_data.get("area"))
 
     def add_c(category, price_key, multiplier=1.0, tier=None):
         if price_key not in prices: return
@@ -73,25 +85,26 @@ def calculate_budget(data, prices):
 
     # === 1. ДЕМОНТАЖ ТА ЧОРНОВІ ВАРІАНТИ ===
     if answers.get("demo_entrance") == "Так": add_c("rough", "demo_door_ent", 1)
-    if int(answers.get("demo_interior", 0) or 0) > 0: 
-        add_c("rough", "demo_door_int", int(answers["demo_interior"]))
+    demo_int_count = _int(answers.get("demo_interior"))
+    if demo_int_count > 0:
+        add_c("rough", "demo_door_int", demo_int_count)
         
     demo_walls = answers.get("demo_build_walls") or {}
     if demo_walls:
-        add_c("rough", "demo_walls", float(demo_walls.get("Демонтаж існуючих стін", 0) or 0))
-        add_c("rough", "build_gkl", float(demo_walls.get("Монтаж: Гіпсокартон", 0) or 0))
-        add_c("rough", "build_brick", float(demo_walls.get("Монтаж: Цегла (1/2)", 0) or 0))
-        add_c("rough", "build_gazoblok", float(demo_walls.get("Монтаж: Газоблок", 0) or 0))
+        add_c("rough", "demo_walls", _num(demo_walls.get("Демонтаж існуючих стін")))
+        add_c("rough", "build_gkl", _num(demo_walls.get("Монтаж: Гіпсокартон")))
+        add_c("rough", "build_brick", _num(demo_walls.get("Монтаж: Цегла (1/2)")))
+        add_c("rough", "build_gazoblok", _num(demo_walls.get("Монтаж: Газоблок")))
 
     demo_floor = answers.get("demo_floor") or {}
     if demo_floor:
-        add_c("rough", "demo_floor_wood", float(demo_floor.get("Паркет / Дерев'яна", 0) or 0))
-        add_c("rough", "demo_floor_lin", float(demo_floor.get("Лінолеум / Ламінат", 0) or 0))
-        add_c("rough", "demo_screed", float(demo_floor.get("Стара стяжка", 0) or 0))
+        add_c("rough", "demo_floor_wood", _num(demo_floor.get("Паркет / Дерев'яна")))
+        add_c("rough", "demo_floor_lin", _num(demo_floor.get("Лінолеум / Ламінат")))
+        add_c("rough", "demo_screed", _num(demo_floor.get("Стара стяжка")))
 
     # Рахуємо загальну площу стін динамічно на основі масиву кімнат
     rooms_list = answers.get("rooms") or []
-    total_walls_area = sum([float(r.get("measurements", {}).get("walls", 0) or 0) for r in rooms_list])
+    total_walls_area = sum([_num((r.get("measurements") or {}).get("walls")) for r in rooms_list])
     
     if answers.get("rough_plaster_done") == "Ні":
         if total_walls_area == 0: 
@@ -99,7 +112,7 @@ def calculate_budget(data, prices):
         add_c("rough", "rough_plaster", total_walls_area)
 
     screed = answers.get("screed_done")
-    screed_area = float(answers.get("screed_area", 0) or 0)
+    screed_area = _num(answers.get("screed_area"))
     if screed_area <= 0: 
         screed_area = client_area
 
@@ -112,7 +125,7 @@ def calculate_budget(data, prices):
         add_c("electric", "electric_point", client_area * 1.5)
 
     if answers.get("plumbing_done") == "Ні":
-        baths_c = int(answers.get("baths_count", 0) or 0)
+        baths_c = _int(answers.get("baths_count"))
         if baths_c == 0:
             baths_c = sum([1 for r in rooms_list if r.get("type") == "bath"])
         add_c("rough", "plumbing", max(1, baths_c) * 5 + 3)
@@ -126,8 +139,8 @@ def calculate_budget(data, prices):
         elif e_type and e_type not in ["Ні", "Немає"]: add_c("doors", "door_entrance_mdf", 1, tier)
 
     int_door = answers.get("interior_door")
-    rooms_c = int(answers.get("rooms_count", 0) or 0)
-    baths_c = int(answers.get("baths_count", 0) or 0)
+    rooms_c = _int(answers.get("rooms_count"))
+    baths_c = _int(answers.get("baths_count"))
     door_count = rooms_c + baths_c
     if door_count == 0:
         door_count = len(rooms_list)
@@ -158,8 +171,8 @@ def calculate_budget(data, prices):
         cat = "baths" if is_bath else "rooms"
         
         meas = room.get("measurements") or {}
-        f_area = float(meas.get("floor", 0) or 0)
-        w_area = float(meas.get("walls", 0) or 0)
+        f_area = _num(meas.get("floor"))
+        w_area = _num(meas.get("walls"))
         
         # Підлога
         floor = room.get("floor")
@@ -203,8 +216,10 @@ def calculate_budget(data, prices):
         if room.get("apron") == "Керамограніт": add_c(cat, "kitchen_apron", 3)
         
         # Змішувачі
-        if room.get("mixer_std"): add_c(cat, "mixer_std", float(room.get("mixer_std", 0)))
-        if room.get("mixer_hidden"): add_c(cat, "mixer_hidden", float(room.get("mixer_hidden", 0)))
+        mix_std = _num(room.get("mixer_std"))
+        if mix_std > 0: add_c(cat, "mixer_std", mix_std)
+        mix_hid = _num(room.get("mixer_hidden"))
+        if mix_hid > 0: add_c(cat, "mixer_hidden", mix_hid)
 
         # Сантехніка (Ванна, Душ, Унітаз)
         shower = room.get("shower") or []
@@ -214,7 +229,7 @@ def calculate_budget(data, prices):
         if "Скляна конструкція з дверима" in shower: add_c(cat, "shower_doors", 1)
         
         tub = room.get("tub") or {}
-        if isinstance(tub, dict) and tub.get("type") not in [None, "Ні", "Немає", "Не потрібно"]:
+        if isinstance(tub, dict) and tub.get("type") not in [None, "", "Ні", "Немає", "Не потрібно"]:
             add_c(cat, "bath_tub", 1, tub.get("tier"))
             
         toilet = room.get("toilet") or {}
@@ -241,8 +256,8 @@ def calculate_budget(data, prices):
             elif "Звукоізоляція" in k: add_c(cat, "soundproof", w_area)
             elif "Утеплення" in k: add_c("rough", "balcony_warm", f_area)
             elif "Робоче місце" in k: add_c(cat, "balcony_workspace", 1)
-            elif "Зовнішнє скління" in k: add_c(cat, "balcony_glazing_outer", float(v) if str(v).replace('.','').isdigit() else 1)
-            elif "Балконний блок" in k: add_c(cat, "balcony_glazing_block", float(v) if str(v).replace('.','').isdigit() else 1)
+            elif "Зовнішнє скління" in k: add_c(cat, "balcony_glazing_outer", _num(v, 1))
+            elif "Балконний блок" in k: add_c(cat, "balcony_glazing_block", _num(v, 1))
             elif any(x in k for x in ["Посудомийн", "Пральн", "Сушильн"]): add_c(cat, "tech_washer", 1, tier)
             elif any(x in k for x in ["Осмос", "Подрібнювач"]): add_c(cat, "tech_osmos", 1, tier)
             elif any(x in k for x in ["Духов", "Мікрохвильов"]): add_c(cat, "tech_kitchen", 1, tier)
@@ -257,16 +272,16 @@ def calculate_budget(data, prices):
     custom_works = answers.get("custom_works") or []
     for cw in custom_works:
         calc_type = cw.get("calc_type", "Фіксована ціна")
-        w_price = float(cw.get("work_price", 0) or 0)
-        m_price = float(cw.get("mat_price", 0) or 0)
+        w_price = _num(cw.get("work_price"))
+        m_price = _num(cw.get("mat_price"))
         zone_id = cw.get("zone_id") # зв'язка йде через унікальний id кімнати
         multiplier = 1.0
 
         if calc_type in ["За м² підлоги", "За м² стін"] and zone_id:
             target_room = next((r for r in rooms_list if r.get("id") == zone_id), None)
             if target_room:
-                r_meas = target_room.get("measurements", {})
-                multiplier = float(r_meas.get("floor", 0) or 0) if calc_type == "За м² підлоги" else float(r_meas.get("walls", 0) or 0)
+                r_meas = target_room.get("measurements") or {}
+                multiplier = _num(r_meas.get("floor")) if calc_type == "За м² підлоги" else _num(r_meas.get("walls"))
             else:
                 multiplier = 0.0
 
@@ -283,3 +298,5 @@ def calculate_budget(data, prices):
         "total_mat_min": total_mat_min,
         "total_mat_max": total_mat_max,
         "costs": costs
+    }
+
