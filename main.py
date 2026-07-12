@@ -68,6 +68,9 @@ _LOCKS = {}
 _PRICES_CACHE = None
 _PRICES_CACHE_TIME = 0
 _PRICES_CACHE_TTL = 300 
+_PRICE_LABELS = {}          # {price_key: "Назва з таблиці"} — для деталізації
+_PRICES_META = {"source": "default", "loaded_at": None, "count": 0}  # для /version
+_STARTED_AT = time.time()
 
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -260,46 +263,299 @@ async def async_save_report(row_id, text): await asyncio.to_thread(_save_report_
 async def async_delete_row(row_id, user_name): return await asyncio.to_thread(_delete_row_sync, row_id, user_name)
 async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
+# ЄДИНЕ ДЖЕРЕЛО ПРАВДИ (fallback): ціни Стандарт (мін) і Преміум (макс).
+# Ці значення використовуються, якщо аркуш "Ціни" в Google-таблиці ще не
+# створено або він недоступний. При першому успішному підключенні аркуш
+# створюється автоматично і заповнюється цими ж значеннями.
+DEFAULT_PRICES = {
+    "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
+    "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
+    "rough_plaster": [805, 340, 400], "electric_wire": [2100, 1000, 2000], "electric_point": [180, 100, 200],
+    "warm_floor_elec": [550, 400, 500], 
+    "door_entrance_mdf": [4700, 15000, 50000], "door_entrance_armor": [5500, 15000, 50000], # Двері: 15к-50к
+    "door_hidden": [30000, 15000, 27000], "door_std": [3650, 8000, 15000],
+    "tile_floor_mosaic": [2600, 1500, 2500], "tile_floor_std": [1900, 1500, 2500], "tile_floor_large": [3100, 1500, 2500],
+    "tile_wall_mosaic": [2800, 1500, 2500], "tile_wall_std": [2100, 1500, 2500], "tile_wall_large": [3300, 1500, 2500],
+    "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], # Унітази: 5к-20к / 12к-30к
+    "bath_tub": [3800, 15000, 100000], # Ванна: 15к-100к
+    "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
+    "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
+    "wall_primer": [55, 0, 0], "wall_vagonka": [1200, 1500, 1500], "wall_koroid": [600, 250, 250],
+    "base_std": [215, 115, 200], "base_shadow": [1435, 400, 800], "base_hidden": [1600, 600, 600],
+    "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
+    "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
+    "kitchen_workspace_led": [1000, 2000, 2000], "balcony_workspace": [1500, 3500, 3500],
+    "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], # Радіатор: 3к-12к / Кондиціонер: 15к-45к
+    "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
+    "boiler_100": [2800, 8000, 25000], "boiler_300": [5000, 8000, 25000], # Бойлер: 8к-25к
+    "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], # Рушникосушка: 3.5к-15к / Гіг.душ: 3к-12к
+    "mirror_led": [600, 1500, 12000], # Дзеркало: 1.5к-12к (робота змінюється в calculator.py)
+    "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000], # Техніка
+    "sink_cabinet": [1600, 10000, 40000], # Умивальник: 10к-40к
+    "mixer_std": [1000, 2000, 15000], "mixer_hidden": [1900, 5000, 25000], # Змішувачі: 2к-15к / 5к-25к
+    "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
+    "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
+    "balcony_glazing_outer": [1000, 4800, 9000], "balcony_glazing_block": [1500, 4800, 9000],
+    "light_point": [250, 300, 800], "light_chandelier": [750, 3500, 3500], "light_track": [780, 1450, 3600], "light_led": [390, 0, 0],
+    "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000],
+    "demo_door_ent": [1200, 0, 0], "demo_door_int": [500, 0, 0], "demo_walls": [400, 0, 0], 
+    "build_gkl": [1100, 600, 600], "build_brick": [1100, 1000, 1000], "build_gazoblok": [850, 600, 600],
+    "demo_floor_wood": [250, 0, 0], "demo_floor_lin": [120, 0, 0], "demo_screed": [320, 0, 0]
+}
+PRICES_SHEET_NAME = "Ціни"
+_PRICES_HEADER = ["key", "Назва", "Робота (грн)", "Матеріал мін (грн)", "Матеріал макс (грн)"]
+
+
+def _prices_bootstrap_sheet(doc):
+    """Створює аркуш «Ціни» і заливає в нього поточні DEFAULT_PRICES.
+    Викликається один раз — далі власник редагує ціни прямо в таблиці."""
+    from calculator import PRICE_META
+    ws = doc.add_worksheet(title=PRICES_SHEET_NAME, rows=str(len(DEFAULT_PRICES) + 20), cols="5")
+    rows = [_PRICES_HEADER]
+    for key, (w, m1, m2) in sorted(DEFAULT_PRICES.items()):
+        label = PRICE_META.get(key, (key, ""))[0]
+        rows.append([key, label, w, m1, m2])
+    ws.update(rows, "A1")
+    ws.format("A1:E1", {"textFormat": {"bold": True}})
+    ws.freeze(rows=1)
+    logging.info("Створено аркуш «Ціни» і заповнено дефолтними значеннями.")
+    return ws
+
+
 def _get_prices_sync():
-    # ЄДИНЕ ДЖЕРЕЛО ПРАВДИ: Ціни Стандарт (мін) і Преміум (макс)
-    DEFAULT_PRICES = {
-        "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
-        "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
-        "rough_plaster": [805, 340, 400], "electric_wire": [2100, 1000, 2000], "electric_point": [180, 100, 200],
-        "warm_floor_elec": [550, 400, 500], 
-        "door_entrance_mdf": [4700, 15000, 50000], "door_entrance_armor": [5500, 15000, 50000], # Двері: 15к-50к
-        "door_hidden": [30000, 15000, 27000], "door_std": [3650, 8000, 15000],
-        "tile_floor_mosaic": [2600, 1500, 2500], "tile_floor_std": [1900, 1500, 2500], "tile_floor_large": [3100, 1500, 2500],
-        "tile_wall_mosaic": [2800, 1500, 2500], "tile_wall_std": [2100, 1500, 2500], "tile_wall_large": [3300, 1500, 2500],
-        "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], # Унітази: 5к-20к / 12к-30к
-        "bath_tub": [3800, 15000, 100000], # Ванна: 15к-100к
-        "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
-        "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
-        "wall_primer": [55, 0, 0], "wall_vagonka": [1200, 1500, 1500], "wall_koroid": [600, 250, 250],
-        "base_std": [215, 115, 200], "base_shadow": [1435, 400, 800], "base_hidden": [1600, 600, 600],
-        "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
-        "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
-        "kitchen_workspace_led": [1000, 2000, 2000], "balcony_workspace": [1500, 3500, 3500],
-        "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], # Радіатор: 3к-12к / Кондиціонер: 15к-45к
-        "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
-        "boiler_100": [2800, 8000, 25000], "boiler_300": [5000, 8000, 25000], # Бойлер: 8к-25к
-        "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], # Рушникосушка: 3.5к-15к / Гіг.душ: 3к-12к
-        "mirror_led": [600, 1500, 12000], # Дзеркало: 1.5к-12к (робота змінюється в calculator.py)
-        "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000], # Техніка
-        "sink_cabinet": [1600, 10000, 40000], # Умивальник: 10к-40к
-        "mixer_std": [1000, 2000, 15000], "mixer_hidden": [1900, 5000, 25000], # Змішувачі: 2к-15к / 5к-25к
-        "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
-        "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
-        "balcony_glazing_outer": [1000, 4800, 9000], "balcony_glazing_block": [1500, 4800, 9000],
-        "light_point": [250, 300, 800], "light_chandelier": [750, 3500, 3500], "light_track": [780, 1450, 3600], "light_led": [390, 0, 0],
-        "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000],
-        "demo_door_ent": [1200, 0, 0], "demo_door_int": [500, 0, 0], "demo_walls": [400, 0, 0], 
-        "build_gkl": [1100, 600, 600], "build_brick": [1100, 1000, 1000], "build_gazoblok": [850, 600, 600],
-        "demo_floor_wood": [250, 0, 0], "demo_floor_lin": [120, 0, 0], "demo_screed": [320, 0, 0]
-    }
-    return DEFAULT_PRICES
+    """Ціни з Google-таблиці (аркуш «Ціни») з кешем на 5 хв.
+
+    Логіка навмисно «незламна»:
+      • аркуша немає  → створюємо і заповнюємо дефолтами;
+      • таблиця лягла → віддаємо останній кеш, а якщо його нема — DEFAULT_PRICES;
+      • у таблиці кривий рядок → пропускаємо саме його, решта цін працює;
+      • ключ є в коді, але його немає в таблиці → береться дефолт (merge).
+    Тобто редагування таблиці НІКОЛИ не може повалити калькулятор у нуль.
+    """
+    global _PRICES_CACHE, _PRICES_CACHE_TIME, _PRICE_LABELS
+    now = time.time()
+    if _PRICES_CACHE and (now - _PRICES_CACHE_TIME) < _PRICES_CACHE_TTL:
+        return _PRICES_CACHE
+
+    prices = dict(DEFAULT_PRICES)   # база: дефолти, поверх — значення з таблиці
+    labels = {}
+    source = "default"
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+        try:
+            ws = doc.worksheet(PRICES_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = _prices_bootstrap_sheet(doc)
+
+        bad = 0
+        for row in ws.get_all_records():      # перший рядок = заголовки
+            key = str(row.get("key", "")).strip()
+            if not key:
+                continue
+            try:
+                w = float(str(row.get("Робота (грн)", 0)).replace(",", ".").replace(" ", "") or 0)
+                m1 = float(str(row.get("Матеріал мін (грн)", 0)).replace(",", ".").replace(" ", "") or 0)
+                m2 = float(str(row.get("Матеріал макс (грн)", 0)).replace(",", ".").replace(" ", "") or 0)
+            except (TypeError, ValueError):
+                bad += 1
+                continue
+            if m2 < m1:                        # захист від описки «макс < мін»
+                m1, m2 = m2, m1
+            prices[key] = [w, m1, m2]
+            label = str(row.get("Назва", "")).strip()
+            if label:
+                labels[key] = label
+        source = "sheet"
+        if bad:
+            logging.warning("Аркуш «Ціни»: пропущено %d некоректних рядків.", bad)
+    except Exception as e:
+        logging.error("Не вдалося прочитати ціни з таблиці (%s). Використовую %s.",
+                      e, "кеш" if _PRICES_CACHE else "DEFAULT_PRICES")
+        if _PRICES_CACHE:
+            return _PRICES_CACHE
+
+    _PRICES_CACHE = prices
+    _PRICES_CACHE_TIME = now
+    _PRICE_LABELS = labels
+    _PRICES_META["source"] = source
+    _PRICES_META["loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _PRICES_META["count"] = len(prices)
+    return prices
+
+
+def get_price_labels():
+    """Назви позицій з колонки «Назва» — для построчної деталізації."""
+    return _PRICE_LABELS
+
 
 async def async_get_prices(): return await asyncio.to_thread(_get_prices_sync)
+
+# ==========================================================
+# СЕРВЕРНІ ЧЕРНЕТКИ + НАГАДУВАННЯ ЧЕРЕЗ 24 ГОД
+# Аркуш "Drafts": user_id | updated_at (ISO) | payload (JSON) | reminded (0/1)
+# Чернетка живе не лише в localStorage телефона: менеджер може продовжити
+# з іншого пристрою, а недороблена заявка не губиться — бот нагадає.
+# ==========================================================
+DRAFTS_SHEET_NAME = "Drafts"
+DRAFT_REMIND_AFTER_H = 24        # через скільки годин нагадувати
+DRAFT_TTL_DAYS = 30              # старші чернетки прибираємо
+
+def _drafts_ws():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+    try:
+        return doc.worksheet(DRAFTS_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = doc.add_worksheet(title=DRAFTS_SHEET_NAME, rows="200", cols="4")
+        ws.append_row(["user_id", "updated_at", "payload", "reminded"])
+        return ws
+
+def _save_draft_sync(user_id, payload):
+    ws = _drafts_ws()
+    blob = json.dumps(payload, ensure_ascii=False)
+    if len(blob) > 45000:        # ліміт клітинки Google Sheets — 50 000 символів
+        logging.warning("Чернетка %s завелика (%d символів) — не зберігаю.", user_id, len(blob))
+        return False
+    row = [str(user_id), datetime.now().isoformat(timespec="seconds"), blob, "0"]
+    try:
+        cell = ws.find(str(user_id), in_column=1)
+    except Exception:
+        cell = None
+    if cell:
+        ws.update([row], f"A{cell.row}:D{cell.row}")   # оновлюємо існуючу
+    else:
+        ws.append_row(row)                             # або створюємо нову
+    return True
+
+def _get_draft_sync(user_id):
+    ws = _drafts_ws()
+    try:
+        cell = ws.find(str(user_id), in_column=1)
+    except Exception:
+        cell = None
+    if not cell:
+        return None
+    vals = ws.row_values(cell.row)
+    if len(vals) < 3 or not vals[2]:
+        return None
+    try:
+        return {"updated_at": vals[1], "payload": json.loads(vals[2])}
+    except json.JSONDecodeError:
+        return None
+
+def _delete_draft_sync(user_id):
+    ws = _drafts_ws()
+    try:
+        cell = ws.find(str(user_id), in_column=1)
+    except Exception:
+        cell = None
+    if cell:
+        ws.delete_rows(cell.row)
+    return True
+
+@cors
+async def api_save_draft(request):
+    init_data = request.headers.get('X-Telegram-Init-Data')
+    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
+    user_id = validate_telegram_data(init_data, BOT_TOKEN)
+    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    try:
+        data = await request.json()
+        ok = await asyncio.to_thread(_save_draft_sync, user_id, data)
+        return web.json_response({"success": ok})
+    except Exception:
+        logging.exception("save_draft failed")
+        return web.json_response({"error": "save_failed"}, status=500)
+
+@cors
+async def api_get_draft(request):
+    init_data = request.headers.get('X-Telegram-Init-Data')
+    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
+    user_id = validate_telegram_data(init_data, BOT_TOKEN)
+    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    try:
+        draft = await asyncio.to_thread(_get_draft_sync, user_id)
+        return web.json_response({"draft": draft})
+    except Exception:
+        logging.exception("get_draft failed")
+        return web.json_response({"draft": None})
+
+@cors
+async def api_delete_draft(request):
+    init_data = request.headers.get('X-Telegram-Init-Data')
+    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
+    user_id = validate_telegram_data(init_data, BOT_TOKEN)
+    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    try:
+        await asyncio.to_thread(_delete_draft_sync, user_id)
+        return web.json_response({"success": True})
+    except Exception:
+        logging.exception("delete_draft failed")
+        return web.json_response({"error": "delete_failed"}, status=500)
+
+def _scan_drafts_for_reminders_sync():
+    """Повертає [(row, user_id, payload)] для чернеток, старших за 24 год і
+    ще не нагаданих; попутно видаляє протухлі (>30 днів)."""
+    ws = _drafts_ws()
+    rows = ws.get_all_values()[1:]     # без заголовка
+    now = datetime.now()
+    due, stale_rows = [], []
+    for idx, r in enumerate(rows, start=2):    # 1 = заголовок
+        if len(r) < 4:
+            continue
+        uid, updated, blob, reminded = r[0], r[1], r[2], r[3]
+        try:
+            ts = datetime.fromisoformat(updated)
+        except (TypeError, ValueError):
+            continue
+        age_h = (now - ts).total_seconds() / 3600
+        if age_h > DRAFT_TTL_DAYS * 24:
+            stale_rows.append(idx)
+            continue
+        if reminded == "0" and age_h >= DRAFT_REMIND_AFTER_H:
+            try:
+                due.append((idx, uid, json.loads(blob)))
+            except json.JSONDecodeError:
+                continue
+    for idx in reversed(stale_rows):   # знизу вгору, щоб не зсувати індекси
+        ws.delete_rows(idx)
+    return due
+
+def _mark_reminded_sync(row):
+    _drafts_ws().update([["1"]], f"D{row}")
+
+async def remind_about_drafts_periodically():
+    """Раз на годину: незавершені чернетки старші за 24 год → бот пише
+    менеджеру з ЖИВОЮ сумою кошторису і кнопкою «Продовжити»."""
+    await asyncio.sleep(120)   # даємо сервісу піднятись
+    while True:
+        try:
+            due = await asyncio.to_thread(_scan_drafts_for_reminders_sync)
+            if due:
+                prices = await async_get_prices()
+            for row, uid, payload in due:
+                try:
+                    b = calculate_budget(apply_virtual_measurements(payload), prices, labels=get_price_labels())
+                    total = round(b["total_work"] + b["total_mat_min"])
+                    name = (payload.get("client") or {}).get("name") or "без назви"
+                    rooms_n = len((payload.get("answers") or {}).get("rooms") or [])
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="✏️ Продовжити заявку", web_app=WebAppInfo(url=WEBAPP_URL))
+                    ]]) if WEBAPP_URL else None
+                    await bot.send_message(
+                        chat_id=int(uid),
+                        text=(f"⏰ *Незавершена заявка*\n\nКлієнт: *{html.escape(str(name))}*\n"
+                              f"Приміщень: {rooms_n}\nОрієнтовний кошторис: *{total:,} ₴*\n\n"
+                              f"Чернетка чекає — завершіть, поки клієнт не охолов.").replace(",", " "),
+                        parse_mode="Markdown", reply_markup=kb)
+                    await asyncio.to_thread(_mark_reminded_sync, row)
+                    await asyncio.sleep(0.5)     # не впираємось у ліміти Telegram
+                except Exception:
+                    logging.exception("Не вдалося нагадати про чернетку (user %s)", uid)
+        except Exception:
+            logging.exception("Цикл нагадувань про чернетки впав — повторю за годину")
+        await asyncio.sleep(3600)
 
 async def clean_locks_periodically():
     while True:
@@ -363,13 +619,30 @@ async def api_save_order(request):
 @cors
 async def api_ping(request):
     return web.Response(text="Pong! Bot is alive 24/7")
+
+@cors
+async def api_version(request):
+    """Що САМЕ зараз крутиться на проді. Render сам віддає SHA коміту в
+    RENDER_GIT_COMMIT — тепер видно, чи доїхав деплой, без здогадок."""
+    await async_get_prices()   # переконуємось, що прайс завантажено (і бачимо джерело)
+    commit = os.getenv('RENDER_GIT_COMMIT', 'local')
+    return web.json_response({
+        "commit": commit,
+        "commit_short": commit[:7],
+        "branch": os.getenv('RENDER_GIT_BRANCH', '-'),
+        "started_at": datetime.fromtimestamp(_STARTED_AT).strftime("%Y-%m-%d %H:%M:%S"),
+        "uptime_min": round((time.time() - _STARTED_AT) / 60, 1),
+        "prices": _PRICES_META,          # source: sheet|default, loaded_at, count
+        "features": ["room_costs", "room_lines", "drafts", "prices_sheet"],
+    })
+
 @cors
 async def api_live_calc(request):
     try:
         data = await request.json()
         data_with_virtual_meas = apply_virtual_measurements(data)
         prices = await async_get_prices()
-        b = calculate_budget(data_with_virtual_meas, prices)
+        b = calculate_budget(data_with_virtual_meas, prices, labels=get_price_labels())
         # Розбивка для міні-апки: по приміщеннях + «загальні роботи»
         # (демонтаж, стяжка, стеля, двері, електророзводка) як залишок.
         # Це НЕ додаткові гроші — той самий total, розкладений на частини.
@@ -385,6 +658,9 @@ async def api_live_calc(request):
                 "work": round(max(b["total_work"] - rooms_w, 0)),
                 "mat_min": round(max(b["total_mat_min"] - rooms_m, 0)),
             },
+            # Построчна деталізація: {room_id: [{label, qty, unit, rate, work, mat_min}]}
+            "room_lines": b.get("room_lines") or {},
+            "general_lines": b.get("general_lines") or [],
         })
     except Exception:
         # Повний traceback — у лог Render (там його і шукати при дебагу);
@@ -607,6 +883,10 @@ async def on_startup(bot: Bot):
     try: await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
     except: pass
     asyncio.create_task(clean_locks_periodically())
+    # Прогріваємо прайс одразу (заодно створює аркуш «Ціни», якщо його ще нема)
+    asyncio.create_task(async_get_prices())
+    # Нагадування про незавершені чернетки (раз на годину)
+    asyncio.create_task(remind_about_drafts_periodically())
 
 async def on_shutdown(bot: Bot): await bot.session.close()
 
@@ -625,6 +905,16 @@ def main():
     app.router.add_options('/api/save_order', api_save_order)
     app.router.add_post('/api/live_calc', api_live_calc)
     app.router.add_options('/api/live_calc', api_live_calc)
+    # Серверні чернетки
+    app.router.add_post('/api/save_draft', api_save_draft)
+    app.router.add_options('/api/save_draft', api_save_draft)
+    app.router.add_get('/api/get_draft', api_get_draft)
+    app.router.add_options('/api/get_draft', api_get_draft)
+    app.router.add_post('/api/delete_draft', api_delete_draft)
+    app.router.add_options('/api/delete_draft', api_delete_draft)
+    # Діагностика: який коміт і звідки ціни
+    app.router.add_get('/version', api_version)
+    app.router.add_options('/version', api_version)
     
     # Наш новий маршрут для бота 24/7
     app.router.add_get('/ping', api_ping)
