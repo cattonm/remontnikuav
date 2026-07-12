@@ -370,8 +370,28 @@ async def api_live_calc(request):
         data_with_virtual_meas = apply_virtual_measurements(data)
         prices = await async_get_prices()
         b = calculate_budget(data_with_virtual_meas, prices)
-        return web.json_response({"work": b["total_work"], "mat_min": b["total_mat_min"]})
-    except Exception as e: return web.json_response({"error": str(e)}, status=500)
+        # Розбивка для міні-апки: по приміщеннях + «загальні роботи»
+        # (демонтаж, стяжка, стеля, двері, електророзводка) як залишок.
+        # Це НЕ додаткові гроші — той самий total, розкладений на частини.
+        rc = b.get("room_costs") or {}
+        rooms_break = {rid: {"work": round(v[0]), "mat_min": round(v[1])} for rid, v in rc.items()}
+        rooms_w = sum(v[0] for v in rc.values())
+        rooms_m = sum(v[1] for v in rc.values())
+        return web.json_response({
+            "work": b["total_work"],
+            "mat_min": b["total_mat_min"],
+            "rooms": rooms_break,
+            "general": {
+                "work": round(max(b["total_work"] - rooms_w, 0)),
+                "mat_min": round(max(b["total_mat_min"] - rooms_m, 0)),
+            },
+        })
+    except Exception:
+        # Повний traceback — у лог Render (там його і шукати при дебагу);
+        # клієнту — генерик: текст винятку може розкривати внутрішню
+        # структуру даних/шляхи, а публічному ендпоінту це ні до чого.
+        logging.exception("live_calc failed")
+        return web.json_response({"error": "calc_failed"}, status=500)
 
 def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))], [KeyboardButton(text="🔐 Кабінет менеджера")]], resize_keyboard=True)
