@@ -12,6 +12,73 @@ def _num(v, default=0.0):
 def _int(v, default=0):
     return int(_num(v, default))
 
+# ==========================================================
+# ДОВІДНИК ПОЗИЦІЙ: людська назва + одиниця виміру за ключем прайсу.
+# Використовується для ПОСТРОЧНОЇ деталізації ("Ламінат · 18 м² × 405 ₴").
+# Назву можна перевизначити з Google-таблиці (колонка "Назва") — вона
+# приїжджає в calculate_budget через аргумент labels і має пріоритет.
+# ==========================================================
+UNIT_M2 = "м²"
+UNIT_PCS = "шт"
+UNIT_PT = "точок"
+
+PRICE_META = {
+    # Чорнові
+    "screed_wet": ("Стяжка мокра", UNIT_M2), "screed_dry": ("Стяжка напівсуха", UNIT_M2),
+    "rough_plaster": ("Штукатурка стін", UNIT_M2), "plumbing": ("Розводка сантехніки", UNIT_PT),
+    "electric_wire": ("Електрика: кабель", UNIT_M2), "electric_point": ("Електрика: точки", UNIT_PT),
+    "warm_floor_elec": ("Тепла підлога (електро)", UNIT_M2),
+    "demo_door_ent": ("Демонтаж вхідних дверей", UNIT_PCS), "demo_door_int": ("Демонтаж міжкімнатних дверей", UNIT_PCS),
+    "demo_walls": ("Демонтаж стін", UNIT_M2), "demo_floor_wood": ("Демонтаж дерев'яної підлоги", UNIT_M2),
+    "demo_floor_lin": ("Демонтаж лінолеуму/ламінату", UNIT_M2), "demo_screed": ("Демонтаж стяжки", UNIT_M2),
+    "build_gkl": ("Монтаж стін: гіпсокартон", UNIT_M2), "build_brick": ("Монтаж стін: цегла", UNIT_M2),
+    "build_gazoblok": ("Монтаж стін: газоблок", UNIT_M2),
+    "logistics_base": ("Логістика", UNIT_M2), "logistics_stair": ("Підйом сходами", UNIT_M2),
+    "logistics_elev": ("Підйом ліфтом", UNIT_M2),
+    # Двері
+    "door_entrance_mdf": ("Вхідні двері (МДФ)", UNIT_PCS), "door_entrance_armor": ("Вхідні двері (броньовані)", UNIT_PCS),
+    "door_hidden": ("Двері прихованого монтажу", UNIT_PCS), "door_std": ("Двері стандарт", UNIT_PCS),
+    # Підлога
+    "tile_floor_std": ("Керамограніт на підлогу", UNIT_M2), "tile_floor_large": ("Великоформатний керамограніт (підлога)", UNIT_M2),
+    "tile_floor_mosaic": ("Мозаїка на підлогу", UNIT_M2), "room_lam": ("Ламінат", UNIT_M2),
+    "room_quartz": ("Кварц-вініл", UNIT_M2), "room_parket": ("Паркет", UNIT_M2), "linoleum": ("Лінолеум", UNIT_M2),
+    # Стіни
+    "tile_wall_std": ("Плитка на стіни", UNIT_M2), "tile_wall_large": ("Великоформатний керамограніт (стіни)", UNIT_M2),
+    "tile_wall_mosaic": ("Мозаїка на стіни", UNIT_M2), "wall_paper": ("Шпалери", UNIT_M2),
+    "wall_paint": ("Фарбування стін", UNIT_M2), "wall_decor": ("Декоративна штукатурка", UNIT_M2),
+    "wall_primer": ("Грунтовка стін", UNIT_M2), "wall_vagonka": ("Вагонка", UNIT_M2),
+    "wall_koroid": ("Короїд", UNIT_M2), "wood_rails": ("Дерев'яні рейки", UNIT_M2),
+    "wall_decor_panels": ("Декоративні панелі", UNIT_PCS), "soundproof": ("Звукоізоляція", UNIT_M2),
+    "whitewash": ("Побілка", UNIT_M2),
+    # Стеля / плінтус
+    "ceil_stretch": ("Натяжна стеля", UNIT_M2), "ceil_gips": ("Гіпсокартонна стеля", UNIT_M2),
+    "ceil_shadow_add": ("Тіньовий шов (стеля)", UNIT_M2),
+    "base_std": ("Плінтус стандарт", UNIT_M2), "base_shadow": ("Тіньовий плінтус", UNIT_M2),
+    "base_hidden": ("Прихований плінтус", UNIT_M2),
+    # Світло
+    "light_point": ("Точкове світло", UNIT_PT), "light_chandelier": ("Люстра", UNIT_PCS),
+    "light_track": ("Трек / лінійне світло", UNIT_PT), "light_led": ("LED-підсвітка", UNIT_M2),
+    "kitchen_workspace_led": ("Підсвітка робочої зони", UNIT_PCS),
+    # Санвузол
+    "toilet_install": ("Унітаз з інсталяцією", UNIT_PCS), "toilet_okrem": ("Унітаз окремостоячий", UNIT_PCS),
+    "bath_tub": ("Ванна", UNIT_PCS), "shower_tray": ("Душовий піддон", UNIT_PCS),
+    "shower_trap": ("Душовий трап", UNIT_PCS), "shower_glass": ("Скляна перегородка", UNIT_PCS),
+    "shower_doors": ("Скляна конструкція з дверима", UNIT_PCS),
+    "sink_cabinet": ("Умивальник з тумбою", UNIT_PCS), "mirror_led": ("Дзеркало з підсвіткою", UNIT_PCS),
+    "towel_dryer": ("Рушникосушка", UNIT_PCS), "hygienic_shower": ("Гігієнічний душ", UNIT_PCS),
+    "mixer_std": ("Змішувач стандарт", UNIT_PCS), "mixer_hidden": ("Змішувач прихований", UNIT_PCS),
+    "boiler_100": ("Бойлер 100 л", UNIT_PCS), "boiler_300": ("Бойлер 300 л", UNIT_PCS),
+    # Кухня / техніка
+    "kitchen_apron": ("Фартух кухні", UNIT_M2), "tech_washer": ("Підключення пральної/посудомийної", UNIT_PCS),
+    "tech_kitchen": ("Підключення кухонної техніки", UNIT_PCS), "tech_osmos": ("Осмос / подрібнювач", UNIT_PCS),
+    # Інше
+    "radiator": ("Радіатор", UNIT_PCS), "ac": ("Кондиціонер", UNIT_PCS), "curtains": ("Карнизи / штори", UNIT_PCS),
+    "sill_plastic": ("Підвіконня пластик", UNIT_PCS), "sill_wood": ("Підвіконня дерево", UNIT_PCS),
+    "sill_stone": ("Підвіконня штучний камінь", UNIT_PCS),
+    "balcony_warm": ("Утеплення балкона", UNIT_M2), "balcony_workspace": ("Робоче місце на балконі", UNIT_PCS),
+    "balcony_glazing_outer": ("Зовнішнє скління", UNIT_PCS), "balcony_glazing_block": ("Балконний блок", UNIT_PCS),
+}
+
 def apply_virtual_measurements(data):
     """
     Залишаємо для сумісності з main.py. 
@@ -19,7 +86,10 @@ def apply_virtual_measurements(data):
     """
     return data
 
-def calculate_budget(data, prices):
+def calculate_budget(data, prices, labels=None):
+    # labels — необов'язковий словник {price_key: "Людська назва"} з колонки
+    # "Назва" Google-таблиці. Якщо не передали — беремо PRICE_META.
+    labels = labels or {}
     costs = {
         "rough": [0.0, 0.0, 0.0],
         "electric": [0.0, 0.0, 0.0],
@@ -78,20 +148,41 @@ def calculate_budget(data, prices):
         costs[category][0] += dw
         costs[category][1] += dm1
         costs[category][2] += dm2
-        # Повертаємо дельту для ПАРАЛЕЛЬНОГО по-кімнатного обліку (room_costs).
-        # Сам словник costs лишається в старому форматі — його за фіксованими
-        # ключами (rough/electric/doors/rooms/baths/custom) читає кабінет
-        # менеджера в боті, тож ключі недоторканні.
-        return (dw, dm1, dm2)
 
-    # --- ПО-КІМНАТНИЙ ОБЛІК (жива розбивка в міні-апці) ---
-    room_costs = {}
-    def track(room_id, delta):
-        """Дописує дельту від add_c у скарбничку конкретної кімнати."""
-        if not room_id or not delta:
+        # --- ПОСТРОЧНА ДЕТАЛІЗАЦІЯ ---
+        # Кожне нарахування = рядок кошторису. Спочатку він "нічий"
+        # (room=None → потрапить у «Загальні роботи»); якщо виклик обгорнутий
+        # у track(rid, ...), рядок переїде в кімнату rid.
+        label, unit = PRICE_META.get(price_key, (price_key, UNIT_PCS))
+        line = {
+            "key": price_key,
+            "label": labels.get(price_key) or label,   # назва з таблиці має пріоритет
+            "unit": unit,
+            "qty": round(float(multiplier), 2),
+            "rate": round(w, 2),                       # ставка за одиницю (робота)
+            "work": round(dw),
+            "mat_min": round(dm1),
+            "mat_max": round(dm2),
+            "room": None,
+        }
+        if tier and isinstance(tier, str) and tier.strip():
+            line["tier"] = tier.strip()
+        all_lines.append(line)
+
+        # Повертаємо сам рядок: він же слугує "дельтою" для по-кімнатного обліку.
+        return line
+
+    # --- ПОЗИЦІЇ ТА ПО-КІМНАТНИЙ ОБЛІК ---
+    all_lines = []      # усі рядки кошторису в порядку нарахування
+    room_costs = {}     # {room_id: [work, mat_min, mat_max]}
+
+    def track(room_id, line):
+        """Прив'язує рядок від add_c до конкретного приміщення."""
+        if not room_id or not line:
             return
+        line["room"] = room_id
         rc = room_costs.setdefault(room_id, [0.0, 0.0, 0.0])
-        rc[0] += delta[0]; rc[1] += delta[1]; rc[2] += delta[2]
+        rc[0] += line["work"]; rc[1] += line["mat_min"]; rc[2] += line.get("mat_max", line["mat_min"])
 
     # === 1. ДЕМОНТАЖ ТА ЧОРНОВІ ВАРІАНТИ ===
     if answers.get("demo_entrance") == "Так": add_c("rough", "demo_door_ent", 1)
@@ -315,13 +406,38 @@ def calculate_budget(data, prices):
         costs["custom"][0] += w_price * multiplier
         costs["custom"][1] += m_price * multiplier
         costs["custom"][2] += m_price * multiplier
-        # Якщо робота прив'язана до конкретного приміщення — дублюємо
-        # у його по-кімнатну скарбничку (для живої розбивки).
-        track(zone_id, (w_price * multiplier, m_price * multiplier, m_price * multiplier))
+        # Кастомна робота — теж повноцінний рядок кошторису (з назвою,
+        # яку ввів менеджер). Якщо прив'язана до кімнати — track() її туди.
+        cw_line = {
+            "key": "custom",
+            "label": cw.get("name") or "Нестандартна робота",
+            "unit": {"За м² підлоги": UNIT_M2, "За м² стін": UNIT_M2}.get(calc_type, UNIT_PCS),
+            "qty": round(float(multiplier), 2),
+            "rate": round(w_price, 2),
+            "work": round(w_price * multiplier),
+            "mat_min": round(m_price * multiplier),
+            "mat_max": round(m_price * multiplier),
+            "room": None,
+        }
+        all_lines.append(cw_line)
+        track(zone_id, cw_line)
 
     total_work = sum(v[0] for v in costs.values())
     total_mat_min = sum(v[1] for v in costs.values())
     total_mat_max = sum(v[2] for v in costs.values())
+
+    # Групуємо рядки: ті, що прив'язані до кімнати — у room_lines,
+    # решта (демонтаж, стяжка, стеля, двері, розводки) — «Загальні роботи».
+    room_lines = {}
+    general_lines = []
+    for ln in all_lines:
+        if ln["work"] == 0 and ln["mat_min"] == 0:
+            continue  # нульові позиції (напр. грунтовка з 0 матеріалу) не показуємо
+        rid = ln.pop("room")
+        if rid:
+            room_lines.setdefault(rid, []).append(ln)
+        else:
+            general_lines.append(ln)
 
     return {
         "total_work": total_work,
@@ -331,6 +447,9 @@ def calculate_budget(data, prices):
         # По-кімнатний облік: {room_id: [work, mat_min, mat_max]}.
         # НЕ входить у total_* повторно — це той самий кошик грошей,
         # просто розкладений за приміщеннями.
-        "room_costs": room_costs
+        "room_costs": room_costs,
+        # Построчна деталізація: {room_id: [{label, qty, unit, rate, work, mat_min}]}
+        "room_lines": room_lines,
+        "general_lines": general_lines,
     }
 
