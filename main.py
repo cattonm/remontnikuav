@@ -7,6 +7,7 @@ import html
 import time
 import csv
 import base64
+import secrets
 import io
 from datetime import datetime
 import asyncio
@@ -16,7 +17,7 @@ from urllib.parse import parse_qsl
 from functools import wraps
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, ContentType, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -873,6 +874,88 @@ async def api_me(request):
 # ==========================================================
 # ВЕБ-КАБІНЕТ: вхід через Telegram Login Widget + API кабінету/адмінки
 # ==========================================================
+# ==========================================================
+# ВХІД НА САЙТ ЧЕРЕЗ БОТА (без Login Widget і без /setdomain)
+# ----------------------------------------------------------
+# Як це працює:
+#   1. Сайт просить у бекенда одноразовий код → отримує deep link
+#      t.me/<bot>?start=web_ABC123.
+#   2. Людина тисне кнопку → відкривається бот → одне натискання «Запустити».
+#   3. Бот бачить свій же код, знає user_id (Telegram його гарантує) і
+#      прив'язує код до цієї людини.
+#   4. Сайт, який усе це врем'я опитує статус, отримує сесійний токен.
+#
+# Чому це безпечно: код живе 5 хвилин, одноразовий, і прив'язати його може
+# лише той, хто реально написав боту зі свого акаунта. Паролів немає.
+# Чому це простіше за Login Widget: не треба /setdomain, не треба знати
+# username бота (питаємо його в самого Telegram), працює і в браузері,
+# і всередині Telegram.
+# ==========================================================
+_WEB_LOGIN = {}                  # {code: {"ts": float, "uid": str|None}}
+LOGIN_CODE_TTL = 300             # 5 хвилин
+_BOT_USERNAME_CACHE = None
+
+async def _get_bot_username():
+    global _BOT_USERNAME_CACHE
+    if not _BOT_USERNAME_CACHE:
+        me = await bot.get_me()
+        _BOT_USERNAME_CACHE = me.username
+    return _BOT_USERNAME_CACHE
+
+def _cleanup_login_codes():
+    now = time.time()
+    for c in [c for c, v in _WEB_LOGIN.items() if now - v["ts"] > LOGIN_CODE_TTL]:
+        _WEB_LOGIN.pop(c, None)
+
+@cors
+async def api_login_start(request):
+    """Видає одноразовий код і deep link на бота."""
+    _cleanup_login_codes()
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(6))
+    _WEB_LOGIN[code] = {"ts": time.time(), "uid": None}
+    username = await _get_bot_username()
+    return web.json_response({
+        "code": code,
+        "bot": username,
+        "deep_link": f"https://t.me/{username}?start=web_{code}",
+        "ttl": LOGIN_CODE_TTL,
+    })
+
+@cors
+async def api_login_poll(request):
+    """Сайт опитує: чи підтвердив уже хтось цей код у боті?"""
+    _cleanup_login_codes()
+    code = (request.query.get("code") or "").strip().upper()
+    entry = _WEB_LOGIN.get(code)
+    if not entry:
+        return web.json_response({"status": "expired"})
+    if not entry["uid"]:
+        return web.json_response({"status": "pending"})
+
+    uid = entry["uid"]
+    role = get_role(uid)
+    _WEB_LOGIN.pop(code, None)              # код одноразовий
+    if not role:
+        return web.json_response({"status": "no_access"})
+    info = get_all_authorized_users().get(str(uid), {})
+    return web.json_response({
+        "status": "ok",
+        "token": create_session(uid, role),
+        "role": role,
+        "user_id": str(uid),
+        "name": info.get("name", ""),
+    })
+
+def bind_login_code(code, user_id):
+    """Викликається з бота: прив'язує код до людини. True, якщо код живий."""
+    _cleanup_login_codes()
+    entry = _WEB_LOGIN.get(str(code).strip().upper())
+    if not entry:
+        return False
+    entry["uid"] = str(user_id)
+    return True
+
 @cors
 async def api_login(request):
     """Обмін підписаних даних Telegram Login Widget на сесійний токен."""
@@ -1100,7 +1183,24 @@ def get_main_menu_keyboard(user_id=None):
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject = None):
+    # DEEP LINK ВХОДУ НА САЙТ: t.me/<bot>?start=web_ABC123
+    # Людина натиснула кнопку на сайті — тут ми підтверджуємо, що це справді
+    # вона (Telegram гарантує user_id), і прив'язуємо код. Сайт впустить сам.
+    payload = (command.args or "") if command else ""
+    if payload.startswith("web_"):
+        code = payload[4:]
+        if not is_authorized(message.from_user.id):
+            return await message.answer(
+                "🔒 У вас ще немає доступу до кабінету.\n\n"
+                "Надішліть мені *код доступу*, який видав адміністратор, "
+                "і повторіть вхід на сайті.", parse_mode="Markdown")
+        if bind_login_code(code, message.from_user.id):
+            return await message.answer(
+                "✅ *Вхід підтверджено!*\n\nПоверніться на сайт — кабінет уже відкрито.",
+                parse_mode="Markdown", reply_markup=get_main_menu_keyboard(message.from_user.id))
+        return await message.answer("⌛️ Код входу застарів. Оновіть сторінку сайту й спробуйте ще раз.")
+
     if not is_authorized(message.from_user.id): return await message.answer(MSG_START_AUTH.format(name=message.from_user.first_name), parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
     await message.answer(MSG_START_MAIN.format(name=message.from_user.first_name), reply_markup=get_main_menu_keyboard(message.from_user.id), parse_mode="Markdown")
 
@@ -1585,6 +1685,10 @@ def main():
     app.router.add_post('/api/live_calc', api_live_calc)
     app.router.add_options('/api/live_calc', api_live_calc)
     # Веб-кабінет: вхід через Telegram Login Widget
+    app.router.add_post('/api/login_start', api_login_start)
+    app.router.add_options('/api/login_start', api_login_start)
+    app.router.add_get('/api/login_poll', api_login_poll)
+    app.router.add_options('/api/login_poll', api_login_poll)
     app.router.add_post('/api/login', api_login)
     app.router.add_options('/api/login', api_login)
     app.router.add_get('/api/orders', api_orders)
