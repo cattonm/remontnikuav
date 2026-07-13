@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 import math
+import re
 import html
 import time
 import csv
@@ -243,6 +244,46 @@ DEAL_STATUSES = {
 }
 SOURCE_LABELS = {"manager": "👔 Менеджер", "web": "🌐 Сайт (самостійно)"}
 
+SHEET_HEADER = ["Дата", "Ім'я", "Телефон", "Тип об'єкта", "Адреса", "Анкета (JSON)",
+                "Звіт", "Статус", "Менеджер", "Джерело", "Угода"]
+
+def _ensure_header_sync():
+    """Гарантує, що рядок 1 — це ШАПКА, а не заявка.
+
+    Через баг із append_row у рядок 1 могла потрапити справжня заявка,
+    знищивши заголовки. Оскільки весь код читає дані з рядка 2, така заявка
+    ставала невидимою. Тут ми це виявляємо і лікуємо БЕЗ втрати даних:
+    вставляємо новий рядок зверху — заявка просто з'їжджає на рядок 2
+    і одразу стає видимою.
+    Ознака «в першому рядку заявка»: колонка A виглядає як дата (2026-...).
+    """
+    sheet = _get_google_sheet()
+    if not sheet:
+        return False
+    first = sheet.row_values(1)
+    a1 = (first[0] if first else "").strip()
+    looks_like_order = bool(re.match(r"^\d{4}-\d{2}-\d{2}", a1))
+
+    if looks_like_order:
+        sheet.insert_row(SHEET_HEADER, index=1, value_input_option="RAW")
+        logging.warning("Відновлено шапку таблиці: заявка з рядка 1 з'їхала на рядок 2.")
+        invalidate_orders_cache()
+        return True
+
+    if not a1:                       # шапки взагалі немає (порожній рядок 1)
+        sheet.update([SHEET_HEADER], "A1:K1", value_input_option="RAW")
+        invalidate_orders_cache()
+        return True
+    return False
+
+async def async_ensure_header():
+    try:
+        return await asyncio.to_thread(_ensure_header_sync)
+    except Exception:
+        logging.exception("Не вдалося перевірити шапку таблиці")
+        return False
+
+
 def _save_to_sheet_sync(data):
     sheet = _get_google_sheet()
     if not sheet: return False, "Неможливо підключитися до Google Таблиці (Можливо, злетіли права або ліміти API)."
@@ -256,17 +297,25 @@ def _save_to_sheet_sync(data):
         row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full,
                     answers, "", "активна", manager_id, source, "new"]
 
-        # ⚠️ insert_data_option="INSERT_ROWS" — КРИТИЧНО.
-        # За замовчуванням append_row працює в режимі OVERWRITE: Google сам
-        # вирішує, де «закінчується таблиця», і якщо всередині даних є порожній
-        # рядок — вважає таблицю закінченою там і ПЕРЕЗАПИСУЄ рядки нижче.
-        # Саме так одна заявка затерла іншу. З INSERT_ROWS рядок ЗАВЖДИ
-        # вставляється новий, нічого не затираючи.
-        sheet.append_row(
-            [str(v) for v in row_data],
+        # ЗАПИС ЗА ЯВНИМ АДРЕСОМ — не довіряємо автовизначенню Google.
+        # append_row сам «шукає кінець таблиці» і на дірках у даних помиляється:
+        # він уже записав заявку в РЯДОК 1, знищивши шапку (а весь код читає
+        # дані з рядка 2 — тож заявка стала невидимою). Тепер рахуємо вільний
+        # рядок самі, скануючи колонку A, і ніколи не пишемо вище рядка 2.
+        col_a = sheet.col_values(1)
+        last_filled = 0
+        for i, val in enumerate(col_a, start=1):
+            if str(val).strip():
+                last_filled = i
+        next_row = max(last_filled + 1, 2)      # рядок 1 — ЗАВЖДИ шапка
+
+        if next_row > sheet.row_count:
+            sheet.add_rows(20)
+
+        sheet.update(
+            [[str(v) for v in row_data]],
+            f"A{next_row}:K{next_row}",
             value_input_option="RAW",
-            insert_data_option="INSERT_ROWS",
-            table_range="A1",
         )
         invalidate_orders_cache()   # нова заявка має з'явитись у кабінеті одразу
         return True, ""
@@ -1974,6 +2023,9 @@ async def on_startup(bot: Bot):
     try: await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
     except: pass
     asyncio.create_task(clean_locks_periodically())
+    # Самолікування таблиці: якщо в рядку 1 опинилась заявка замість шапки —
+    # повертаємо шапку на місце (заявка з'їжджає на рядок 2 і стає видимою).
+    asyncio.create_task(async_ensure_header())
     # Прогріваємо прайс одразу (заодно створює аркуш «Ціни», якщо його ще нема)
     asyncio.create_task(async_get_prices())
     # Нагадування про незавершені чернетки (раз на годину)

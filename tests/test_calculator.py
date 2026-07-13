@@ -221,20 +221,29 @@ def test_no_global_tier_keeps_old_behaviour():
 #  бо Google вважав таблицю завершеною на порожньому рядку)
 # --------------------------------------------------------------------
 
-def test_append_must_use_insert_rows(monkeypatch):
-    """Збереження зобов'язане просити в Google саме INSERT_ROWS."""
+def test_save_never_writes_to_header_row(monkeypatch):
+    """Заявка НІКОЛИ не має потрапити в рядок 1 (це шапка) і не має затирати
+    існуючі рядки. Реальний інцидент: append_row вирішив, що таблиця порожня,
+    записав заявку в рядок 1 і знищив заголовки — заявка стала невидимою,
+    бо весь код читає дані з рядка 2."""
     import main
 
-    captured = {}
+    written = {}
 
     class FakeSheet:
-        def append_row(self, vals, value_input_option=None,
-                       insert_data_option=None, table_range=None):
-            captured["mode"] = insert_data_option
+        row_count = 100
+        def col_values(self, c):
+            # Дірка в даних: рядки 2-5 порожні, заявки в 6-9
+            return ["Дата", "", "", "", "", "2026-03-04", "2026-03-12", "2026-03-16", "2026-04-20"]
+        def update(self, vals, rng, value_input_option=None):
+            written["range"] = rng
+        def add_rows(self, n):
+            pass
 
     monkeypatch.setattr(main, "_get_google_sheet", lambda: FakeSheet())
     main._save_to_sheet_sync({"client": {"name": "X", "area": "10"},
                               "answers": {}, "manager_id": "1", "source": "manager"})
-    assert captured["mode"] == "INSERT_ROWS", (
-        "append_row без INSERT_ROWS перезаписує існуючі рядки — заявки зникають!"
-    )
+
+    row = int(written["range"].split(":")[0][1:])
+    assert row >= 2, "запис у рядок 1 знищує шапку таблиці!"
+    assert row == 10, f"заявка мала лягти в рядок 10 (після останньої), а не {row} — це затерло б дані"
