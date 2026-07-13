@@ -9,7 +9,7 @@ import csv
 import base64
 import secrets
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import hashlib
 import hmac
@@ -255,21 +255,11 @@ def _save_to_sheet_sync(data):
         source = data.get("source") or ("manager" if manager_id else "web")
         row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full,
                     answers, "", "активна", manager_id, source, "new"]
-        
-        col_a = sheet.col_values(1)
-        last_real_row = 0
-        for i, val in enumerate(col_a):
-            if val.strip() != "":
-                last_real_row = i + 1
-        
-        next_row = last_real_row + 1
-        if next_row > sheet.row_count:
-            sheet.add_rows(10)
-            
-        cell_list = sheet.range(f'A{next_row}:K{next_row}')
-        for i, val in enumerate(row_data):
-            cell_list[i].value = str(val)
-        sheet.update_cells(cell_list)
+
+        # Було: col_values(1) + range() + update_cells() = ТРИ звернення до Google
+        # на одне збереження (і повне читання колонки A на додачу).
+        # append_row сам знаходить перший вільний рядок — одне звернення.
+        sheet.append_row([str(v) for v in row_data], value_input_option="RAW")
         invalidate_orders_cache()   # нова заявка має з'явитись у кабінеті одразу
         return True, ""
     except Exception as e:
@@ -337,8 +327,10 @@ def invalidate_orders_cache():
     _ORDERS_CACHE["rows"] = None
     _ORDERS_CACHE["ts"] = 0
 
-def _fetch_orders_rows_sync():
-    """Легке читання аркуша: тільки метадані заявок, без JSON анкети."""
+def _fetch_orders_rows_sync(include_deleted=False):
+    """Легке читання аркуша: тільки метадані заявок, без JSON анкети.
+    include_deleted нічого не змінює в читанні (кеш спільний) — фільтрація
+    за статусом відбувається вище, в _list_orders_sync / _list_trash_sync."""
     now = time.time()
     if _ORDERS_CACHE["rows"] is not None and (now - _ORDERS_CACHE["ts"]) < _ORDERS_TTL:
         return _ORDERS_CACHE["rows"]
@@ -404,15 +396,89 @@ def _list_orders_sync(user_id, role, deal_filter=None, query=None):
     return out
 
 def _set_deal_status_sync(row_id, deal, claim_by=None):
-    """Змінює статус угоди. claim_by — якщо менеджер бере вільний лід собі."""
+    """Змінює статус угоди. claim_by — якщо менеджер бере вільний лід собі.
+    Пишемо ОДНИМ batch-запитом: раніше було два окремих update_cell,
+    тобто два звернення до Google на одну дію."""
     sheet = _get_google_sheet()
     if not sheet:
         return False
-    sheet.update_cell(int(row_id), 11, deal)        # K = deal
+    updates = [{"range": f"K{int(row_id)}", "values": [[deal]]}]
     if claim_by:
-        sheet.update_cell(int(row_id), 9, str(claim_by))   # I = manager_id
+        updates.append({"range": f"I{int(row_id)}", "values": [[str(claim_by)]]})
+    sheet.batch_update(updates)
     invalidate_orders_cache()   # інакше кабінет ще 30 с показував би старий статус
     return True
+
+
+# ==========================================================
+# ВИДАЛЕННЯ ЗАЯВОК: два рівні
+# ----------------------------------------------------------
+# 1) КОШИК (soft delete) — колонка H = "видалена". Заявка зникає зі списку,
+#    але фізично лишається: її можна відновити. Так працює будь-яка адекватна
+#    CRM, бо випадковий клік не має знищувати контакт клієнта назавжди.
+# 2) ОСТАТОЧНА ЧИСТКА (hard delete) — рядок фізично видаляється з таблиці.
+#    Доступна ЛИШЕ адміну і лише для того, що вже лежить у кошику.
+# Рядки видаляємо пачками, згрупувавши в суцільні діапазони: 50 окремих
+# викликів delete_rows — це 50 звернень до API і майже гарантований 429.
+# ==========================================================
+def _soft_delete_sync(row_id, deleted=True):
+    sheet = _get_google_sheet()
+    if not sheet:
+        return False
+    sheet.update_cell(int(row_id), 8, "видалена" if deleted else "активна")   # H
+    invalidate_orders_cache()
+    return True
+
+def _purge_rows_sync(rows):
+    """Фізичне видалення рядків. Повертає кількість видалених.
+    Видаляємо ЗВЕРХУ ВНИЗ у зворотному порядку — інакше після кожного
+    видалення індекси нижніх рядків з'їжджають і ми зносимо не те."""
+    sheet = _get_google_sheet()
+    if not sheet or not rows:
+        return 0
+    rows = sorted({int(r) for r in rows if int(r) > 1}, reverse=True)
+    if not rows:
+        return 0
+
+    # Групуємо сусідні рядки в суцільні діапазони (менше викликів API)
+    groups = []
+    start = prev = rows[0]
+    for r in rows[1:]:
+        if r == prev - 1:
+            prev = r
+            continue
+        groups.append((prev, start))     # (від меншого, до більшого)
+        start = prev = r
+    groups.append((prev, start))
+
+    deleted = 0
+    for lo, hi in groups:
+        sheet.delete_rows(lo, hi)
+        deleted += hi - lo + 1
+    invalidate_orders_cache()
+    return deleted
+
+def _list_trash_sync(role, user_id):
+    """Кошик: те, що позначене як «видалена». Менеджер бачить лише свої."""
+    out = []
+    for entry in _fetch_orders_rows_sync(include_deleted=True):
+        m = _meta_from_parts(entry)
+        if m["status"] != "видалена":
+            continue
+        if role != ROLE_ADMIN and m["manager_id"] != str(user_id):
+            continue
+        out.append(m)
+    out.reverse()
+    return out
+
+async def async_soft_delete(row_id, deleted=True):
+    return await asyncio.to_thread(_soft_delete_sync, row_id, deleted)
+
+async def async_purge_rows(rows):
+    return await asyncio.to_thread(_purge_rows_sync, rows)
+
+async def async_list_trash(role, user_id):
+    return await asyncio.to_thread(_list_trash_sync, role, user_id)
 
 async def async_list_orders(user_id, role, deal_filter=None, query=None):
     return await asyncio.to_thread(_list_orders_sync, user_id, role, deal_filter, query)
@@ -1047,6 +1113,104 @@ async def api_login(request):
     except Exception:
         logging.exception("login failed")
         return web.json_response({"error": "server_error"}, status=500)
+
+@cors
+async def api_order_delete(request):
+    """У КОШИК (м'яке видалення). Менеджер може прибрати лише свою заявку
+    або вільний лід; адмін — будь-яку. Дані не знищуються."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        row_id = int((await request.json()).get("row"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_row"}, status=400)
+
+    raw = await async_get_row_data(row_id)
+    if not raw:
+        return web.json_response({"error": "not_found"}, status=404)
+    m = _row_meta(raw)
+    if role != ROLE_ADMIN:
+        mine = m["manager_id"] == str(uid)
+        free_lead = (m["source"] == "web" and not m["manager_id"])
+        if not (mine or free_lead):
+            return web.json_response({"error": "forbidden"}, status=403)
+
+    await async_soft_delete(row_id, True)
+    await async_log_action(f"web:{uid}", f"🗑 У кошик: заявка {row_id} ({m['name']})")
+    return web.json_response({"success": True})
+
+@cors
+async def api_order_restore(request):
+    """Повернути заявку з кошика."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        row_id = int((await request.json()).get("row"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_row"}, status=400)
+    raw = await async_get_row_data(row_id)
+    if not raw:
+        return web.json_response({"error": "not_found"}, status=404)
+    m = _row_meta(raw)
+    if role != ROLE_ADMIN and m["manager_id"] != str(uid):
+        return web.json_response({"error": "forbidden"}, status=403)
+    await async_soft_delete(row_id, False)
+    await async_log_action(f"web:{uid}", f"♻️ Відновлено заявку {row_id}")
+    return web.json_response({"success": True})
+
+@cors
+async def api_trash(request):
+    """Вміст кошика."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    items = await async_list_trash(role, uid)
+    users = get_all_authorized_users()
+    for m in items:
+        m["manager_name"] = users.get(m["manager_id"], {}).get("name", "") if m["manager_id"] else ""
+    return web.json_response({"orders": items, "role": role})
+
+@cors
+async def api_purge(request):
+    """ОСТАТОЧНЕ видалення — тільки адмін і тільки з кошика.
+    Приймає або список рядків, або older_than_days (авточистка).
+    Захист: усе, що не позначене «видалена», ігнорується — тобто активну
+    заявку неможливо знищити цим ендпоінтом навіть навмисно."""
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    data = await request.json()
+
+    trash = await async_list_trash(ROLE_ADMIN, uid)
+    trash_rows = {m["row"]: m for m in trash}
+
+    if data.get("older_than_days"):
+        try:
+            days = int(data["older_than_days"])
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_days"}, status=400)
+        limit_dt = datetime.now() - timedelta(days=days)
+        targets = []
+        for r, m in trash_rows.items():
+            try:
+                # У колонці A формат "YYYY-MM-DD HH:MM" (+ можливий суфікс)
+                dt = datetime.strptime(m["date"][:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            if dt < limit_dt:
+                targets.append(r)
+    else:
+        requested = data.get("rows") or []
+        targets = [int(r) for r in requested if int(r) in trash_rows]
+
+    if not targets:
+        return web.json_response({"success": True, "deleted": 0})
+
+    deleted = await async_purge_rows(targets)
+    await async_log_action(f"web:{uid}", f"🔥 ОСТАТОЧНО видалено заявок: {deleted}")
+    return web.json_response({"success": True, "deleted": deleted})
 
 @cors
 async def api_orders(request):
@@ -1824,6 +1988,15 @@ def main():
     app.router.add_options('/api/orders', api_orders)
     app.router.add_get('/api/order_detail', api_order_detail)
     app.router.add_options('/api/order_detail', api_order_detail)
+    # Видалення: кошик → відновлення → остаточна чистка
+    app.router.add_post('/api/order_delete', api_order_delete)
+    app.router.add_options('/api/order_delete', api_order_delete)
+    app.router.add_post('/api/order_restore', api_order_restore)
+    app.router.add_options('/api/order_restore', api_order_restore)
+    app.router.add_get('/api/trash', api_trash)
+    app.router.add_options('/api/trash', api_trash)
+    app.router.add_post('/api/purge', api_purge)
+    app.router.add_options('/api/purge', api_purge)
     app.router.add_post('/api/order_status', api_order_status)
     app.router.add_options('/api/order_status', api_order_status)
     app.router.add_post('/api/create_order', api_create_order)
