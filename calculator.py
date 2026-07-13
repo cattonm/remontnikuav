@@ -90,6 +90,11 @@ def calculate_budget(data, prices, labels=None):
     # labels — необов'язковий словник {price_key: "Людська назва"} з колонки
     # "Назва" Google-таблиці. Якщо не передали — беремо PRICE_META.
     labels = labels or {}
+    answers_for_tier = (data.get("answers") or {})
+    # ГЛОБАЛЬНИЙ РІВЕНЬ (Стандарт / Комфорт / Преміум): застосовується до
+    # всіх позицій, де рівень не заданий явно в самій кімнаті. Один тумблер
+    # перераховує ВЕСЬ кошторис — у Kapitel такого немає.
+    GLOBAL_TIER = str(answers_for_tier.get("global_tier") or "").strip() or None
     costs = {
         "rough": [0.0, 0.0, 0.0],
         "electric": [0.0, 0.0, 0.0],
@@ -105,6 +110,10 @@ def calculate_budget(data, prices, labels=None):
 
     def add_c(category, price_key, multiplier=1.0, tier=None):
         if price_key not in prices: return None
+        # Явний рівень позиції (напр. «Ванна: Преміум») має пріоритет;
+        # якщо його нема — діє глобальний тумблер.
+        if not tier:
+            tier = GLOBAL_TIER
         p = prices[price_key]
         w = float(p[0])
         m1 = float(p[1])

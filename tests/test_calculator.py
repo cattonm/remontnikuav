@@ -184,3 +184,32 @@ def test_price_meta_covers_all_keys_used():
     технічний ідентифікатор замість «Ламінат»."""
     missing = [k for k in PRICES if k not in PRICE_META]
     assert not missing, f"Немає назв для ключів: {missing}"
+
+
+# --------------------------------------------------------------------
+# ГЛОБАЛЬНИЙ РІВЕНЬ (Стандарт / Комфорт / Преміум)
+# --------------------------------------------------------------------
+
+def test_global_tier_changes_materials_not_work():
+    """Тумблер рівня міняє вартість МАТЕРІАЛІВ; робота лишається та сама."""
+    rooms = [room("b1", "bath", "С/в", 5, 20, floor="Керамограніт")]
+    std = calc({"global_tier": "Стандарт", "rooms": rooms})
+    prem = calc({"global_tier": "Преміум", "rooms": rooms})
+    assert std["total_work"] == prem["total_work"] == 1900 * 5
+    assert std["total_mat_min"] == 1500 * 5     # мін-ціна матеріалу
+    assert prem["total_mat_min"] == 2500 * 5    # макс-ціна матеріалу
+    assert prem["total_mat_min"] > std["total_mat_min"]
+
+
+def test_explicit_tier_beats_global():
+    """Явний рівень позиції важливіший за глобальний тумблер."""
+    b = calc({"global_tier": "Стандарт", "rooms": [
+        room("b1", "bath", "С/в", 5, 20, tub={"type": "Акрилова", "tier": "Преміум"})]})
+    assert b["total_mat_min"] == 100000     # преміум-ванна, попри глобальний «Стандарт»
+
+
+def test_no_global_tier_keeps_old_behaviour():
+    """Без тумблера — стара поведінка: мін..макс вилка."""
+    b = calc({"rooms": [room("b1", "bath", "С/в", 5, 20, floor="Керамограніт")]})
+    assert b["total_mat_min"] == 1500 * 5
+    assert b["total_mat_max"] == 2500 * 5
