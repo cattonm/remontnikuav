@@ -213,3 +213,28 @@ def test_no_global_tier_keeps_old_behaviour():
     b = calc({"rooms": [room("b1", "bath", "С/в", 5, 20, floor="Керамограніт")]})
     assert b["total_mat_min"] == 1500 * 5
     assert b["total_mat_max"] == 2500 * 5
+
+
+# --------------------------------------------------------------------
+# РЕГРЕСІЯ: збереження заявки НЕ МАЄ затирати сусідні рядки
+# (реальний інцидент: append_row у режимі OVERWRITE знищив заявку,
+#  бо Google вважав таблицю завершеною на порожньому рядку)
+# --------------------------------------------------------------------
+
+def test_append_must_use_insert_rows(monkeypatch):
+    """Збереження зобов'язане просити в Google саме INSERT_ROWS."""
+    import main
+
+    captured = {}
+
+    class FakeSheet:
+        def append_row(self, vals, value_input_option=None,
+                       insert_data_option=None, table_range=None):
+            captured["mode"] = insert_data_option
+
+    monkeypatch.setattr(main, "_get_google_sheet", lambda: FakeSheet())
+    main._save_to_sheet_sync({"client": {"name": "X", "area": "10"},
+                              "answers": {}, "manager_id": "1", "source": "manager"})
+    assert captured["mode"] == "INSERT_ROWS", (
+        "append_row без INSERT_ROWS перезаписує існуючі рядки — заявки зникають!"
+    )

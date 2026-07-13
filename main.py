@@ -256,10 +256,18 @@ def _save_to_sheet_sync(data):
         row_data = [timestamp, c.get('name'), c.get('phone'), c.get('object_type'), address_full,
                     answers, "", "активна", manager_id, source, "new"]
 
-        # Було: col_values(1) + range() + update_cells() = ТРИ звернення до Google
-        # на одне збереження (і повне читання колонки A на додачу).
-        # append_row сам знаходить перший вільний рядок — одне звернення.
-        sheet.append_row([str(v) for v in row_data], value_input_option="RAW")
+        # ⚠️ insert_data_option="INSERT_ROWS" — КРИТИЧНО.
+        # За замовчуванням append_row працює в режимі OVERWRITE: Google сам
+        # вирішує, де «закінчується таблиця», і якщо всередині даних є порожній
+        # рядок — вважає таблицю закінченою там і ПЕРЕЗАПИСУЄ рядки нижче.
+        # Саме так одна заявка затерла іншу. З INSERT_ROWS рядок ЗАВЖДИ
+        # вставляється новий, нічого не затираючи.
+        sheet.append_row(
+            [str(v) for v in row_data],
+            value_input_option="RAW",
+            insert_data_option="INSERT_ROWS",
+            table_range="A1",
+        )
         invalidate_orders_cache()   # нова заявка має з'явитись у кабінеті одразу
         return True, ""
     except Exception as e:
