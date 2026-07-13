@@ -9,3 +9,4 @@ fastapi
 gspread
 oauth2client
 google.generativeai
+pytest
