@@ -6,6 +6,7 @@ import math
 import html
 import time
 import csv
+import base64
 import io
 from datetime import datetime
 import asyncio
@@ -77,7 +78,7 @@ _STARTED_AT = time.time()
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Telegram-Init-Data'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Telegram-Init-Data, X-Session-Token'
     return response
 
 def cors(handler):
@@ -111,6 +112,91 @@ def validate_telegram_data(init_data: str, bot_token: str):
         return None
     except:
         return None
+
+def validate_login_widget(data: dict, bot_token: str):
+    """Перевірка даних з Telegram Login Widget (вхід на ЗВИЧАЙНОМУ сайті).
+
+    Відрізняється від initData: секрет — це SHA256(bot_token) без солі
+    "WebAppData", а рядок перевірки збирається з плоского словника.
+    Підпис гарантує, що дані прийшли саме від Telegram і не підроблені —
+    тому паролі не потрібні взагалі.
+    """
+    try:
+        data = dict(data)
+        hash_val = data.pop("hash", None)
+        if not hash_val:
+            return None
+        # Захист від replay: дані старші за добу не приймаємо
+        if abs(time.time() - int(data.get("auth_date", 0))) > 86400:
+            return None
+        check = "\n".join(f"{k}={data[k]}" for k in sorted(data) if data[k] is not None)
+        secret = hashlib.sha256(bot_token.encode()).digest()
+        calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        return int(data["id"]) if hmac.compare_digest(calc, hash_val) else None
+    except Exception:
+        return None
+
+
+# ==========================================================
+# СЕСІЇ ДЛЯ САЙТУ
+# ----------------------------------------------------------
+# Після входу через Telegram видаємо підписаний токен: base64(payload).signature.
+# Підпис — HMAC на BOT_TOKEN, тож підробити або продовжити термін неможливо.
+# Токен зберігається у localStorage і їде в заголовку X-Session-Token.
+# Нічого не тримаємо в пам'яті сервера — Render перезапускається, а сесії живуть.
+# ==========================================================
+SESSION_TTL = 30 * 24 * 3600      # 30 днів
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+def create_session(user_id, role):
+    payload = json.dumps({"uid": str(user_id), "role": role,
+                          "exp": int(time.time()) + SESSION_TTL}, separators=(",", ":"))
+    body = _b64e(payload.encode())
+    sig = hmac.new(BOT_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{body}.{sig}"
+
+def read_session(token):
+    """Повертає {'uid', 'role'} або None. Роль ПЕРЕПЕРЕВІРЯЄМО в таблиці —
+    якщо доступ відкликано, старий токен перестає діяти негайно."""
+    try:
+        body, sig = str(token).split(".", 1)
+        expect = hmac.new(BOT_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expect):
+            return None
+        data = json.loads(_b64d(body))
+        if data.get("exp", 0) < time.time():
+            return None
+        role_now = get_role(data["uid"])       # актуальна роль, а не та, що в токені
+        if not role_now:
+            return None
+        return {"uid": data["uid"], "role": role_now}
+    except Exception:
+        return None
+
+def auth_request(request):
+    """ЄДИНА точка автентифікації. Розуміє обидва входи:
+       • X-Telegram-Init-Data — міні-апка всередині Telegram;
+       • X-Session-Token      — сайт у звичайному браузері.
+    Повертає (user_id, role) або (None, None)."""
+    token = request.headers.get('X-Session-Token')
+    if token:
+        s = read_session(token)
+        if s:
+            return s["uid"], s["role"]
+    init_data = request.headers.get('X-Telegram-Init-Data')
+    if init_data:
+        uid = validate_telegram_data(init_data, BOT_TOKEN)
+        if uid:
+            role = get_role(uid)
+            if role:
+                return str(uid), role
+    return None, None
+
 
 async def notify_admin_about_error(context_msg, error_details):
     try:
@@ -539,10 +625,8 @@ def _delete_draft_sync(user_id):
 
 @cors
 async def api_save_draft(request):
-    init_data = request.headers.get('X-Telegram-Init-Data')
-    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
-    user_id = validate_telegram_data(init_data, BOT_TOKEN)
-    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    user_id, _role = auth_request(request)   # працює і в Telegram, і на сайті
+    if not user_id: return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         data = await request.json()
         ok = await asyncio.to_thread(_save_draft_sync, user_id, data)
@@ -553,10 +637,8 @@ async def api_save_draft(request):
 
 @cors
 async def api_get_draft(request):
-    init_data = request.headers.get('X-Telegram-Init-Data')
-    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
-    user_id = validate_telegram_data(init_data, BOT_TOKEN)
-    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    user_id, _role = auth_request(request)   # працює і в Telegram, і на сайті
+    if not user_id: return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         draft = await asyncio.to_thread(_get_draft_sync, user_id)
         return web.json_response({"draft": draft})
@@ -566,10 +648,8 @@ async def api_get_draft(request):
 
 @cors
 async def api_delete_draft(request):
-    init_data = request.headers.get('X-Telegram-Init-Data')
-    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
-    user_id = validate_telegram_data(init_data, BOT_TOKEN)
-    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    user_id, _role = auth_request(request)   # працює і в Telegram, і на сайті
+    if not user_id: return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         await asyncio.to_thread(_delete_draft_sync, user_id)
         return web.json_response({"success": True})
@@ -674,10 +754,8 @@ async def api_get_order(request):
 
 @cors
 async def api_save_order(request):
-    init_data = request.headers.get('X-Telegram-Init-Data')
-    if not init_data: return web.json_response({"error": "Unauthorized"}, status=401)
-    user_id = validate_telegram_data(init_data, BOT_TOKEN)
-    if not user_id or not is_authorized(user_id): return web.json_response({"error": "Access Denied"}, status=403)
+    user_id, _role = auth_request(request)   # працює і в Telegram, і на сайті
+    if not user_id: return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         data = await request.json()
         edit_id = data.get("edit_id")
@@ -740,7 +818,15 @@ async def api_submit_lead(request):
         if not str(c.get("name") or "").strip():
             return web.json_response({"error": "no_name"}, status=400)
 
-        lead = {"client": c, "answers": data.get("answers") or {}, "source": "web", "manager_id": ""}
+        answers = data.get("answers") or {}
+        # НЕ ДОВІРЯЄМО ЦІНАМ ВІД ГОСТЯ. У фронтенді розділ «Нестандартні роботи»
+        # гостю не показується, але POST можна надіслати й напряму — тож
+        # вирізаємо його тут: інакше будь-хто міг би підкинути в кошторис
+        # довільні суми (хоч мільйон, хоч нуль).
+        if isinstance(answers, dict) and answers.get("custom_works"):
+            answers = {k: v for k, v in answers.items() if k != "custom_works"}
+
+        lead = {"client": c, "answers": answers, "source": "web", "manager_id": ""}
         success, err = await async_save_to_sheet(lead)
         if not success:
             await notify_admin_about_error("Заявка з сайту", err)
@@ -776,19 +862,180 @@ async def api_submit_lead(request):
 @cors
 async def api_me(request):
     """Хто я: роль визначає, що покаже фронтенд.
-    Немає initData (сайт у браузері) або немає доступу → гість:
+    Працює для обох входів (міні-апка або веб-сесія). Без доступу — гість:
     вільний калькулятор + форма контакту в кінці."""
-    init_data = request.headers.get('X-Telegram-Init-Data')
-    if not init_data:
+    uid, role = auth_request(request)
+    if not uid:
         return web.json_response({"role": "guest"})
-    user_id = validate_telegram_data(init_data, BOT_TOKEN)
-    if not user_id:
-        return web.json_response({"role": "guest"})
-    role = get_role(user_id)
-    if not role:
-        return web.json_response({"role": "guest"})
-    info = get_all_authorized_users().get(str(user_id), {})
-    return web.json_response({"role": role, "user_id": user_id, "name": info.get("name", "")})
+    info = get_all_authorized_users().get(str(uid), {})
+    return web.json_response({"role": role, "user_id": uid, "name": info.get("name", "")})
+
+# ==========================================================
+# ВЕБ-КАБІНЕТ: вхід через Telegram Login Widget + API кабінету/адмінки
+# ==========================================================
+@cors
+async def api_login(request):
+    """Обмін підписаних даних Telegram Login Widget на сесійний токен."""
+    try:
+        data = await request.json()
+        user_id = validate_login_widget(data, BOT_TOKEN)
+        if not user_id:
+            return web.json_response({"error": "bad_signature"}, status=401)
+
+        role = get_role(user_id)
+        if not role:
+            # Вхід є, але доступу немає. Даємо шанс одразу активувати інвайт-код,
+            # щоб людину не викидало «в нікуди».
+            code = str(data.get("invite") or "").strip().upper()
+            if code:
+                ok, res = await asyncio.to_thread(
+                    redeem_invite, code, user_id,
+                    f"{data.get('first_name','')} {data.get('last_name','')}".strip() or "Менеджер",
+                    data.get("username") or "немає")
+                if not ok:
+                    return web.json_response({"error": "bad_invite", "message": res}, status=403)
+                role = res
+            else:
+                return web.json_response({"error": "no_access"}, status=403)
+
+        info = get_all_authorized_users().get(str(user_id), {})
+        return web.json_response({
+            "token": create_session(user_id, role),
+            "role": role,
+            "user_id": str(user_id),
+            "name": info.get("name") or data.get("first_name") or "",
+        })
+    except Exception:
+        logging.exception("login failed")
+        return web.json_response({"error": "server_error"}, status=500)
+
+@cors
+async def api_orders(request):
+    """Список заявок для кабінету на сайті (з фільтром і пошуком)."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    deal = request.query.get("deal") or None
+    query = request.query.get("q") or None
+    orders = await async_list_orders(uid, role, deal, query)
+    users = get_all_authorized_users()
+    for o in orders:
+        o["manager_name"] = users.get(o["manager_id"], {}).get("name", "") if o["manager_id"] else ""
+        o["deal_label"] = DEAL_STATUSES[o["deal"]]
+    return web.json_response({"orders": orders, "role": role})
+
+@cors
+async def api_order_status(request):
+    """Зміна статусу угоди / взяття вільного ліда в роботу."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+        row = int(data.get("row"))
+        deal = str(data.get("deal") or "new")
+        if deal not in DEAL_STATUSES:
+            return web.json_response({"error": "bad_status"}, status=400)
+        claim = uid if data.get("claim") else None
+        await async_set_deal_status(row, deal, claim_by=claim)
+        await async_log_action(f"web:{uid}", f"🔄 Статус заявки {row} → {DEAL_STATUSES[deal]}")
+        return web.json_response({"success": True})
+    except Exception:
+        logging.exception("order_status failed")
+        return web.json_response({"error": "server_error"}, status=500)
+
+@cors
+async def api_admin_users(request):
+    """Список доступів. Тільки для адміна."""
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    users = get_all_authorized_users(force_refresh=True)
+    out = [{"user_id": u, "name": i.get("name", ""), "username": i.get("username", ""),
+            "role": i.get("role", ROLE_MANAGER), "is_master": str(u) == str(MASTER_ADMIN_ID)}
+           for u, i in users.items()]
+    return web.json_response({"users": out})
+
+@cors
+async def api_admin_invite(request):
+    """Створення одноразового коду для нового менеджера. Тільки адмін."""
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    code = await asyncio.to_thread(create_invite, uid, ROLE_MANAGER)
+    if not code:
+        return web.json_response({"error": "create_failed"}, status=500)
+    return web.json_response({"code": code, "ttl_days": 7})
+
+@cors
+async def api_admin_revoke(request):
+    """Відкликання доступу. Майстер-адміна забрати не можна."""
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    data = await request.json()
+    target = str(data.get("user_id") or "")
+    if not target or target == str(MASTER_ADMIN_ID):
+        return web.json_response({"error": "forbidden"}, status=403)
+    await asyncio.to_thread(remove_authorized_user, target)
+    await async_log_action(f"web:{uid}", f"⛔️ Відкликав доступ у {target}")
+    return web.json_response({"success": True})
+
+@cors
+async def api_admin_stats(request):
+    """Воронка: статуси, джерела, зріз по менеджерах."""
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    orders = await async_list_orders(uid, ROLE_ADMIN)
+    users = get_all_authorized_users()
+    by_status = {k: sum(1 for o in orders if o["deal"] == k) for k in DEAL_STATUSES}
+    by_mgr = {}
+    for o in orders:
+        if not o["manager_id"]:
+            continue
+        nm = users.get(o["manager_id"], {}).get("name", o["manager_id"])
+        by_mgr[nm] = by_mgr.get(nm, 0) + 1
+    won, lost = by_status["won"], by_status["lost"]
+    return web.json_response({
+        "total": len(orders),
+        "by_status": by_status,
+        "labels": DEAL_STATUSES,
+        "web_leads": sum(1 for o in orders if o["source"] == "web"),
+        "conversion": (won * 100 // (won + lost)) if (won + lost) else None,
+        "by_manager": by_mgr,
+    })
+
+@cors
+async def api_create_order(request):
+    """Нова заявка з ВЕБ-кабінету. У міні-апці заявка йде через tg.sendData
+    (бот ловить web_app_data), але в браузері такого каналу немає — тож
+    менеджер з веб-сесією зберігає її сюди. Авторство підписуємо з сесії,
+    а не з тіла запиту: підмінити чужий manager_id неможливо."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+        payload = {"client": data.get("client") or {},
+                   "answers": data.get("answers") or {},
+                   "manager_id": str(uid), "source": "manager"}
+        success, err = await async_save_to_sheet(payload)
+        if not success:
+            await notify_admin_about_error("Заявка з веб-кабінету", err)
+            return web.json_response({"error": "save_failed"}, status=500)
+        name = (payload["client"] or {}).get("name", "")
+        await async_log_action(f"web:{uid}", f"🆕 СТВОРИВ нову заявку: {name}")
+        try:
+            await bot.send_message(chat_id=int(uid),
+                                   text=f"✅ *Заявку прийнято* (з веб-кабінету)\n👤 {html.escape(str(name))}",
+                                   parse_mode="Markdown")
+        except Exception:
+            pass
+        return web.json_response({"success": True})
+    except Exception:
+        logging.exception("create_order failed")
+        return web.json_response({"error": "server_error"}, status=500)
 
 @cors
 async def api_ping(request):
@@ -1337,6 +1584,24 @@ def main():
     app.router.add_options('/api/save_order', api_save_order)
     app.router.add_post('/api/live_calc', api_live_calc)
     app.router.add_options('/api/live_calc', api_live_calc)
+    # Веб-кабінет: вхід через Telegram Login Widget
+    app.router.add_post('/api/login', api_login)
+    app.router.add_options('/api/login', api_login)
+    app.router.add_get('/api/orders', api_orders)
+    app.router.add_options('/api/orders', api_orders)
+    app.router.add_post('/api/order_status', api_order_status)
+    app.router.add_options('/api/order_status', api_order_status)
+    app.router.add_post('/api/create_order', api_create_order)
+    app.router.add_options('/api/create_order', api_create_order)
+    # Адмінка на сайті
+    app.router.add_get('/api/admin/users', api_admin_users)
+    app.router.add_options('/api/admin/users', api_admin_users)
+    app.router.add_post('/api/admin/invite', api_admin_invite)
+    app.router.add_options('/api/admin/invite', api_admin_invite)
+    app.router.add_post('/api/admin/revoke', api_admin_revoke)
+    app.router.add_options('/api/admin/revoke', api_admin_revoke)
+    app.router.add_get('/api/admin/stats', api_admin_stats)
+    app.router.add_options('/api/admin/stats', api_admin_stats)
     # Публічний калькулятор: хто я + заявка від гостя
     app.router.add_get('/api/me', api_me)
     app.router.add_options('/api/me', api_me)
