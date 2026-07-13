@@ -1423,6 +1423,16 @@ async def api_version(request):
     RENDER_GIT_COMMIT — тепер видно, чи доїхав деплой, без здогадок."""
     await async_get_prices()   # переконуємось, що прайс завантажено (і бачимо джерело)
     commit = os.getenv('RENDER_GIT_COMMIT', 'local')
+    # Скільки заявок сервер РЕАЛЬНО бачить у таблиці. Це головна діагностика:
+    # якщо тут число > 0, а кабінет порожній — проблема в доступі/фронтенді,
+    # а не в збереженні. Якщо 0 або error — дивимось саме на таблицю.
+    orders_info = {}
+    try:
+        rows = await asyncio.to_thread(_fetch_orders_rows_sync)
+        orders_info = {"rows_visible": len(rows)}
+    except Exception as e:
+        orders_info = {"error": str(e)[:200]}
+
     return web.json_response({
         "commit": commit,
         "commit_short": commit[:7],
@@ -1430,7 +1440,8 @@ async def api_version(request):
         "started_at": datetime.fromtimestamp(_STARTED_AT).strftime("%Y-%m-%d %H:%M:%S"),
         "uptime_min": round((time.time() - _STARTED_AT) / 60, 1),
         "prices": _PRICES_META,          # source: sheet|default, loaded_at, count
-        "features": ["room_costs", "room_lines", "drafts", "prices_sheet"],
+        "orders": orders_info,
+        "features": ["room_costs", "room_lines", "drafts", "prices_sheet", "trash", "web_cabinet"],
     })
 
 @cors
