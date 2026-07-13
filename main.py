@@ -270,6 +270,7 @@ def _save_to_sheet_sync(data):
         for i, val in enumerate(row_data):
             cell_list[i].value = str(val)
         sheet.update_cells(cell_list)
+        invalidate_orders_cache()   # нова заявка має з'явитись у кабінеті одразу
         return True, ""
     except Exception as e:
         print(f"Sheet save error: {e}")
@@ -290,6 +291,7 @@ def _update_row_sync(row_id, data):
         for i, val in enumerate(row_data):
             cell_list[i].value = val
         sheet.update_cells(cell_list)
+        invalidate_orders_cache()   # оновлені ім'я/телефон/адреса — одразу в кабінеті
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -317,21 +319,75 @@ def _row_meta(row):
         "deal": deal,
     }
 
+# ==========================================================
+# КЕШ СПИСКУ ЗАЯВОК
+# ----------------------------------------------------------
+# Було: кожен запит кабінету робив sheet.get_all_values() — тобто тягнув
+# УСІ колонки, включно з F, де лежить повний JSON анкети (десятки КБ на
+# заявку). Сто заявок = мегабайти з Google на кожне натискання фільтра,
+# а квота Google Sheets — 60 читань за хвилину. Тепер:
+#   • читаємо ЛИШЕ потрібні колонки (A-E, H-K), важкий JSON не чіпаємо;
+#   • тримаємо результат у пам'яті 30 секунд;
+#   • скидаємо кеш одразу після будь-якої зміни (нова заявка, статус).
+# ==========================================================
+_ORDERS_CACHE = {"rows": None, "ts": 0}
+_ORDERS_TTL = 30
+
+def invalidate_orders_cache():
+    _ORDERS_CACHE["rows"] = None
+    _ORDERS_CACHE["ts"] = 0
+
+def _fetch_orders_rows_sync():
+    """Легке читання аркуша: тільки метадані заявок, без JSON анкети."""
+    now = time.time()
+    if _ORDERS_CACHE["rows"] is not None and (now - _ORDERS_CACHE["ts"]) < _ORDERS_TTL:
+        return _ORDERS_CACHE["rows"]
+
+    sheet = _get_google_sheet()
+    if not sheet:
+        return []
+    # A-E: дата, ім'я, телефон, тип, адреса | H-K: статус, менеджер, джерело, угода.
+    # Колонку F (повний JSON) свідомо НЕ читаємо — вона потрібна лише при
+    # відкритті конкретної заявки.
+    left, right = sheet.batch_get(["A2:E", "H2:K"])
+    rows = []
+    for i in range(max(len(left), len(right))):
+        a = left[i] if i < len(left) else []
+        b = right[i] if i < len(right) else []
+        if not a or not (a[0] or "").strip():
+            continue
+        a = list(a) + [""] * (5 - len(a))
+        b = list(b) + [""] * (4 - len(b))
+        rows.append({"row": i + 2, "a": a, "b": b})
+
+    _ORDERS_CACHE["rows"] = rows
+    _ORDERS_CACHE["ts"] = now
+    return rows
+
+def _meta_from_parts(entry):
+    a, b = entry["a"], entry["b"]
+    deal = (b[3] or "new").strip().lower()
+    if deal not in DEAL_STATUSES:
+        deal = "new"
+    return {
+        "row": entry["row"],
+        "date": a[0].strip(), "name": a[1].strip(), "phone": a[2].strip(),
+        "type": a[3].strip(), "address": a[4].strip(),
+        "status": (b[0] or "активна").strip(),
+        "manager_id": (b[1] or "").strip(),
+        "source": ((b[2] or "manager").strip().lower()),
+        "deal": deal,
+    }
+
 def _list_orders_sync(user_id, role, deal_filter=None, query=None):
     """Заявки, які має бачити цей користувач.
       • admin   — усі;
       • manager — свої + вільні гостьові ліди (нічиї);
     Плюс фільтр за статусом угоди і пошук за іменем/телефоном/адресою."""
-    sheet = _get_google_sheet()
-    if not sheet:
-        return []
-    rows = sheet.get_all_values()
     out = []
     q = (query or "").strip().lower()
-    for idx, row in enumerate(rows[1:], start=2):
-        if not row or not row[0].strip():
-            continue
-        m = _row_meta(row)
+    for entry in _fetch_orders_rows_sync():
+        m = _meta_from_parts(entry)
         if m["status"] == "видалена":
             continue
         if role != ROLE_ADMIN:
@@ -343,7 +399,6 @@ def _list_orders_sync(user_id, role, deal_filter=None, query=None):
             continue
         if q and q not in f"{m['name']} {m['phone']} {m['address']}".lower():
             continue
-        m["row"] = idx
         out.append(m)
     out.reverse()      # найновіші зверху
     return out
@@ -356,6 +411,7 @@ def _set_deal_status_sync(row_id, deal, claim_by=None):
     sheet.update_cell(int(row_id), 11, deal)        # K = deal
     if claim_by:
         sheet.update_cell(int(row_id), 9, str(claim_by))   # I = manager_id
+    invalidate_orders_cache()   # інакше кабінет ще 30 с показував би старий статус
     return True
 
 async def async_list_orders(user_id, role, deal_filter=None, query=None):
@@ -994,18 +1050,91 @@ async def api_login(request):
 
 @cors
 async def api_orders(request):
-    """Список заявок для кабінету на сайті (з фільтром і пошуком)."""
+    """Список заявок для кабінету (з фільтром, пошуком і пагінацією).
+    Свідомо НЕ віддаємо тут повний JSON анкети й не рахуємо кошториси —
+    інакше кожне відкриття списку тягнуло б мегабайти й тисячі множень.
+    Сума конкретної заявки приїжджає окремо, коли її розгортають."""
     uid, role = auth_request(request)
     if not uid:
         return web.json_response({"error": "unauthorized"}, status=401)
     deal = request.query.get("deal") or None
     query = request.query.get("q") or None
+    try:
+        limit = max(1, min(int(request.query.get("limit", 20)), 100))
+        offset = max(0, int(request.query.get("offset", 0)))
+    except ValueError:
+        limit, offset = 20, 0
+
     orders = await async_list_orders(uid, role, deal, query)
     users = get_all_authorized_users()
-    for o in orders:
+    page = orders[offset:offset + limit]
+    for o in page:
         o["manager_name"] = users.get(o["manager_id"], {}).get("name", "") if o["manager_id"] else ""
-        o["deal_label"] = DEAL_STATUSES[o["deal"]]
-    return web.json_response({"orders": orders, "role": role})
+
+    # Лічильники по статусах рахуємо з ТОГО САМОГО кешу — без зайвих читань
+    all_for_counts = await async_list_orders(uid, role, None, query)
+    counts = {k: sum(1 for o in all_for_counts if o["deal"] == k) for k in DEAL_STATUSES}
+
+    return web.json_response({
+        "orders": page,
+        "total": len(orders),
+        "counts": counts,
+        "all_total": len(all_for_counts),
+        "role": role,
+        "has_more": offset + limit < len(orders),
+    })
+
+@cors
+async def api_order_detail(request):
+    """Повна заявка + порахований кошторис. Викликається лише коли менеджер
+    розгортає конкретну картку — тож важкий JSON читаємо точково."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        row_id = int(request.query.get("row"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_row"}, status=400)
+
+    row = await async_get_row_data(row_id)
+    if not row:
+        return web.json_response({"error": "not_found"}, status=404)
+    m = _row_meta(row)
+
+    # Менеджер не має бачити чужі заявки навіть за прямим row_id
+    if role != ROLE_ADMIN:
+        mine = m["manager_id"] == str(uid)
+        free_lead = (m["source"] == "web" and not m["manager_id"])
+        if not (mine or free_lead):
+            return web.json_response({"error": "forbidden"}, status=403)
+
+    budget = None
+    rooms = []
+    try:
+        payload = json.loads(row[5])
+        prices = await async_get_prices()
+        b = calculate_budget(apply_virtual_measurements(payload), prices, labels=get_price_labels())
+        rc = b.get("room_costs") or {}
+        for r in (payload.get("answers") or {}).get("rooms") or []:
+            c = rc.get(r.get("id")) or [0, 0, 0]
+            rooms.append({
+                "name": r.get("name"),
+                "area": (r.get("measurements") or {}).get("floor"),
+                "work": round(c[0]), "mat_min": round(c[1]),
+                "lines": (b.get("room_lines") or {}).get(r.get("id"), []),
+            })
+        budget = {
+            "work": round(b["total_work"]),
+            "mat_min": round(b["total_mat_min"]),
+            "mat_max": round(b["total_mat_max"]),
+            "total": round(b["total_work"] + b["total_mat_min"]),
+            "general_lines": b.get("general_lines") or [],
+        }
+    except Exception:
+        logging.exception("order_detail: не вдалося порахувати кошторис для рядка %s", row_id)
+
+    m["manager_name"] = get_all_authorized_users().get(m["manager_id"], {}).get("name", "") if m["manager_id"] else ""
+    return web.json_response({"order": m, "budget": budget, "rooms": rooms})
 
 @cors
 async def api_order_status(request):
@@ -1693,6 +1822,8 @@ def main():
     app.router.add_options('/api/login', api_login)
     app.router.add_get('/api/orders', api_orders)
     app.router.add_options('/api/orders', api_orders)
+    app.router.add_get('/api/order_detail', api_order_detail)
+    app.router.add_options('/api/order_detail', api_order_detail)
     app.router.add_post('/api/order_status', api_order_status)
     app.router.add_options('/api/order_status', api_order_status)
     app.router.add_post('/api/create_order', api_create_order)
