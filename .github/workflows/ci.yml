@@ -1,0 +1,55 @@
+name: CI
+
+# Ганяється на кожен пуш і кожен PR у main.
+# Мета проста: битий коміт більше НІКОЛИ не поїде на Render тихо.
+# Історія: деплой падав на ModuleNotFoundError, Render мовчки лишав живою
+# стару версію — і кімнати не тарифікувались, хоча код у репо був правильний.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Синтаксис · Імпорт · Тести
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Встановити залежності
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Синтаксис усіх .py
+        run: python -m compileall -q . -x '\.git'
+
+      - name: Тести калькулятора
+        run: python -m pytest tests/ -q
+
+      # Найважливіший крок: імітуємо старт на Render з фейковими env.
+      # Саме тут ловиться "забув закомітити модуль" — той самий баг,
+      # через який прод місяцями крутив стару версію.
+      - name: Імпорт main.py (імітація старту на Render)
+        env:
+          BOT_TOKEN: '123456789:AAHfakeTokenForCiImportCheck_000000000'
+          GEMINI_API_KEY: 'fake'
+          GOOGLE_CREDS_JSON: '{}'
+          RENDER_EXTERNAL_URL: 'https://example.onrender.com'
+        run: |
+          python -c "
+          import main
+          assert hasattr(main, 'api_live_calc'), 'немає ендпоінта live_calc'
+          assert hasattr(main, 'api_version'), 'немає ендпоінта /version'
+          assert main.DEFAULT_PRICES, 'порожній прайс'
+          print('OK: main.py імпортується, ендпоінти на місці')
+          "
