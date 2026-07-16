@@ -52,8 +52,8 @@ from config import (
     _ALLOWED_ORIGINS, _require_env, DEFAULT_PRICES,
     DEAL_STATUSES, SHEET_HEADER, PRICES_SHEET_NAME, _PRICES_HEADER,
 )
-# Шар сховища винесено в storage_sheets.py (Етап 2).
-from storage_sheets import (
+# Доступ до сховища через фасад storage (Етап 3): sheets|postgres за env.
+from storage import (
     _log_action_sync, async_log_action, _get_google_sheet, _ensure_header_sync,
     async_ensure_header, _save_to_sheet_sync, _update_row_sync, _get_row_data_sync,
     _row_meta, invalidate_orders_cache, _fetch_orders_rows_sync, _meta_from_parts,
@@ -957,7 +957,8 @@ async def api_create_order(request):
         data = await request.json()
         payload = {"client": data.get("client") or {},
                    "answers": data.get("answers") or {},
-                   "manager_id": str(uid), "source": "manager"}
+                   "manager_id": str(uid), "source": "manager",
+                   "submission_id": data.get("submission_id")}   # захист від дублю
         success, err = await async_save_to_sheet(payload)
         if not success:
             await notify_admin_about_error("Заявка з веб-кабінету", err)
