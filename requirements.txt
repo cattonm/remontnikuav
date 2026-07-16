@@ -1,12 +1,16 @@
-aiogram
-aiohttp
-anthropic
-gspread
-oauth2client
-python-dotenv
-uvicorn
-fastapi
-gspread
-oauth2client
-google.generativeai
-pytest
+# Ядро бота і веб-сервера
+aiogram==3.13.1
+aiohttp==3.10.10
+
+# Google Sheets (тимчасове сховище — планується міграція на Postgres)
+gspread==6.1.4
+google-auth==2.35.0          # заміна застарілого oauth2client
+
+# LLM для генерації звітів
+google-generativeai==0.8.3
+
+# Конфіг
+python-dotenv==1.0.1
+
+# Тести (потрібні лише в CI/dev, але лишаємо тут заради простоти)
+pytest==8.3.3

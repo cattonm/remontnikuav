@@ -4,7 +4,7 @@ import logging
 import secrets
 import datetime
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 # --- НАЛАШТУВАННЯ БЕЗПЕКИ ---
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'SECURE_FALLBACK_ERR_999')
@@ -36,7 +36,7 @@ def get_auth_sheet():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         client = gspread.authorize(creds)
         doc = client.open(SPREADSHEET_NAME)
         
@@ -191,7 +191,7 @@ INVITE_TTL_DAYS = 7
 def _invites_sheet():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)
+        creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)
         doc = gspread.authorize(creds).open(SPREADSHEET_NAME)
         try:
             return doc.worksheet("Invites")

@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Секрети та локальне оточення — НІКОЛИ не комітити
+.env
+*.env
+google-creds*.json
+service-account*.json

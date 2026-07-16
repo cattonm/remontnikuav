@@ -25,7 +25,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 import google.generativeai as genai
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 from security import (ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users,
                       add_authorized_user, remove_authorized_user, clear_auth_cache,
@@ -44,19 +44,13 @@ except ImportError:
     art_router = None
     logging.warning("art_curator.py не знайдено — стартуємо без цього роутера.")
 
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
-SPREADSHEET_NAME = "remonts sheets" 
-
-GROUP_CHAT_ID = "-5265068775" # Замінити на свій ID групи
-
-WEB_SERVER_HOST = "0.0.0.0"
-WEB_SERVER_PORT = 10000
-WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
-WEBHOOK_PATH = "/webhook"
-WEBAPP_URL = "https://siteremontt.vercel.app"
-WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'DefaultSecretToken12345')
+# Налаштування і дефолтний прайс винесено в config.py (Етап 2).
+from config import (
+    BOT_TOKEN, GEMINI_API_KEY, GOOGLE_CREDS_JSON, SPREADSHEET_NAME,
+    GROUP_CHAT_ID, WEB_SERVER_HOST, WEB_SERVER_PORT, WEBHOOK_URL,
+    WEBHOOK_PATH, WEBAPP_URL, WEBHOOK_SECRET, SESSION_SECRET,
+    _ALLOWED_ORIGINS, _require_env, DEFAULT_PRICES,
+)
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
@@ -77,8 +71,12 @@ _PRICE_LABELS = {}          # {price_key: "Назва з таблиці"} — д
 _PRICES_META = {"source": "default", "loaded_at": None, "count": 0}  # для /version
 _STARTED_AT = time.time()
 
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+def add_cors_headers(response, origin=None):
+    # Відповідаємо конкретним origin лише якщо він у білому списку.
+    # Для чужих origin заголовок не ставимо взагалі — браузер сам заблокує.
+    if origin and origin in _ALLOWED_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Telegram-Init-Data, X-Session-Token'
     return response
@@ -86,10 +84,11 @@ def add_cors_headers(response):
 def cors(handler):
     @wraps(handler)
     async def wrapper(request):
+        origin = request.headers.get('Origin')
         if request.method == 'OPTIONS':
-            return add_cors_headers(web.Response())
+            return add_cors_headers(web.Response(), origin)
         response = await handler(request)
-        return add_cors_headers(response)
+        return add_cors_headers(response, origin)
     return wrapper
 
 def is_throttled(user_id, action, delay=10):
@@ -159,7 +158,7 @@ def create_session(user_id, role):
     payload = json.dumps({"uid": str(user_id), "role": role,
                           "exp": int(time.time()) + SESSION_TTL}, separators=(",", ":"))
     body = _b64e(payload.encode())
-    sig = hmac.new(BOT_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{body}.{sig}"
 
 def read_session(token):
@@ -167,7 +166,7 @@ def read_session(token):
     якщо доступ відкликано, старий токен перестає діяти негайно."""
     try:
         body, sig = str(token).split(".", 1)
-        expect = hmac.new(BOT_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+        expect = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
         if not hmac.compare_digest(sig, expect):
             return None
         data = json.loads(_b64d(body))
@@ -210,7 +209,7 @@ async def notify_admin_about_error(context_msg, error_details):
 def _log_action_sync(user_name, action):
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+        doc = gspread.authorize(Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)).open(SPREADSHEET_NAME)
         try:
             ws = doc.worksheet("Logs")
         except:
@@ -225,7 +224,7 @@ async def async_log_action(user_name, action):
 def _get_google_sheet():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME).sheet1
+        return gspread.authorize(Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)).open(SPREADSHEET_NAME).sheet1
     except Exception as e:
         return None
 
@@ -546,7 +545,7 @@ async def async_set_deal_status(row_id, deal, claim_by=None):
 def _delete_row_sync(row_id, user_name):
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+        doc = gspread.authorize(Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)).open(SPREADSHEET_NAME)
         sheet = doc.sheet1
         row_data = sheet.row_values(row_id)
         if row_data:
@@ -616,41 +615,6 @@ async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get
 # Ці значення використовуються, якщо аркуш "Ціни" в Google-таблиці ще не
 # створено або він недоступний. При першому успішному підключенні аркуш
 # створюється автоматично і заповнюється цими ж значеннями.
-DEFAULT_PRICES = {
-    "logistics_base": [150, 0, 0], "logistics_stair": [30, 0, 0], "logistics_elev": [10, 0, 0],
-    "screed_wet": [1100, 700, 700], "screed_dry": [500, 500, 500], "plumbing": [1100, 300, 300],
-    "rough_plaster": [805, 340, 400], "electric_wire": [2100, 1000, 2000], "electric_point": [180, 100, 200],
-    "warm_floor_elec": [550, 400, 500], 
-    "door_entrance_mdf": [4700, 15000, 50000], "door_entrance_armor": [5500, 15000, 50000], # Двері: 15к-50к
-    "door_hidden": [30000, 15000, 27000], "door_std": [3650, 8000, 15000],
-    "tile_floor_mosaic": [2600, 1500, 2500], "tile_floor_std": [1900, 1500, 2500], "tile_floor_large": [3100, 1500, 2500],
-    "tile_wall_mosaic": [2800, 1500, 2500], "tile_wall_std": [2100, 1500, 2500], "tile_wall_large": [3300, 1500, 2500],
-    "toilet_okrem": [2000, 5000, 20000], "toilet_install": [4900, 12000, 30000], # Унітази: 5к-20к / 12к-30к
-    "bath_tub": [3800, 15000, 100000], # Ванна: 15к-100к
-    "room_lam": [405, 600, 900], "room_quartz": [565, 1200, 1800], "room_parket": [850, 2500, 5000], "linoleum": [150, 300, 600],
-    "wall_paper": [1000, 200, 400], "wall_paint": [1865, 250, 450], "wall_decor": [2210, 500, 1500], "whitewash": [100, 50, 100], "wood_rails": [800, 1500, 3500],
-    "wall_primer": [55, 0, 0], "wall_vagonka": [1200, 1500, 1500], "wall_koroid": [600, 250, 250],
-    "base_std": [215, 115, 200], "base_shadow": [1435, 400, 800], "base_hidden": [1600, 600, 600],
-    "ceil_stretch": [400, 390, 390], "ceil_gips": [2500, 650, 650], 
-    "ceil_shadow_add": [350, 150, 300], "wall_decor_panels": [5000, 8000, 15000], 
-    "kitchen_workspace_led": [1000, 2000, 2000], "balcony_workspace": [1500, 3500, 3500],
-    "radiator": [3400, 3000, 12000], "ac": [13000, 15000, 45000], # Радіатор: 3к-12к / Кондиціонер: 15к-45к
-    "soundproof": [830, 1000, 2500], "curtains": [500, 3000, 10000],
-    "boiler_100": [2800, 8000, 25000], "boiler_300": [5000, 8000, 25000], # Бойлер: 8к-25к
-    "towel_dryer": [1200, 3500, 15000], "hygienic_shower": [1900, 3000, 12000], # Рушникосушка: 3.5к-15к / Гіг.душ: 3к-12к
-    "mirror_led": [600, 1500, 12000], # Дзеркало: 1.5к-12к (робота змінюється в calculator.py)
-    "tech_washer": [1050, 15000, 40000], "tech_kitchen": [1050, 10000, 30000], "tech_osmos": [2000, 8000, 25000], # Техніка
-    "sink_cabinet": [1600, 10000, 40000], # Умивальник: 10к-40к
-    "mixer_std": [1000, 2000, 15000], "mixer_hidden": [1900, 5000, 25000], # Змішувачі: 2к-15к / 5к-25к
-    "sill_plastic": [800, 1500, 1500], "sill_wood": [1500, 3000, 3000], "sill_stone": [2000, 4000, 8000],
-    "balcony_warm": [600, 600, 800], "kitchen_apron": [4000, 3000, 8000],
-    "balcony_glazing_outer": [1000, 4800, 9000], "balcony_glazing_block": [1500, 4800, 9000],
-    "light_point": [250, 300, 800], "light_chandelier": [750, 3500, 3500], "light_track": [780, 1450, 3600], "light_led": [390, 0, 0],
-    "shower_tray": [3000, 8000, 20000], "shower_trap": [10000, 3000, 5000], "shower_glass": [3500, 8000, 15000], "shower_doors": [3500, 12000, 20000],
-    "demo_door_ent": [1200, 0, 0], "demo_door_int": [500, 0, 0], "demo_walls": [400, 0, 0], 
-    "build_gkl": [1100, 600, 600], "build_brick": [1100, 1000, 1000], "build_gazoblok": [850, 600, 600],
-    "demo_floor_wood": [250, 0, 0], "demo_floor_lin": [120, 0, 0], "demo_screed": [320, 0, 0]
-}
 PRICES_SHEET_NAME = "Ціни"
 _PRICES_HEADER = ["key", "Назва", "Робота (грн)", "Матеріал мін (грн)", "Матеріал макс (грн)"]
 
@@ -691,7 +655,7 @@ def _get_prices_sync():
     source = "default"
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+        doc = gspread.authorize(Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)).open(SPREADSHEET_NAME)
         try:
             ws = doc.worksheet(PRICES_SHEET_NAME)
         except gspread.exceptions.WorksheetNotFound:
@@ -752,7 +716,7 @@ DRAFT_TTL_DAYS = 30              # старші чернетки прибира�
 
 def _drafts_ws():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    doc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GOOGLE_CREDS_JSON), scope)).open(SPREADSHEET_NAME)
+    doc = gspread.authorize(Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=scope)).open(SPREADSHEET_NAME)
     try:
         return doc.worksheet(DRAFTS_SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
@@ -2034,6 +1998,7 @@ async def on_startup(bot: Bot):
 async def on_shutdown(bot: Bot): await bot.session.close()
 
 def main():
+    _require_env()   # падаємо голосно, якщо критичних env немає
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
