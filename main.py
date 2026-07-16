@@ -277,17 +277,16 @@ SOURCE_LABELS = {"manager": "👔 Менеджер", "web": "🌐 Сайт (са
 
 
 def _get_orders_keyboard_sync(page=1):
-    sheet = _get_google_sheet()
-    if not sheet: return None
+    # Читаємо через фасад сховища (Postgres або Sheets — залежно від
+    # STORAGE_BACKEND), а НЕ напряму з Google. Раніше цей список ходив у
+    # таблицю в обхід фасаду, тож у postgres-режимі показував старі заявки.
     try:
-        all_rows = sheet.get_all_values()
-        if not all_rows or len(all_rows) < 2: return None
         active_rows = []
-        for i, row in enumerate(all_rows[1:], start=2):
-            if not row[0].strip() or len(row) < 2: continue
-            status = row[7] if len(row) > 7 else "активна"
-            if status == "активна": active_rows.append((i, row))
-        
+        for entry in _fetch_orders_rows_sync():
+            m = _meta_from_parts(entry)
+            if m["status"] == "активна":
+                active_rows.append((m["row"], f"{m['name'] or '-'} | {m['phone'] or '-'}"))
+
         total_active = len(active_rows)
         per_page = 10
         total_pages = math.ceil(total_active / per_page) if total_active > 0 else 1
@@ -298,8 +297,8 @@ def _get_orders_keyboard_sync(page=1):
         page_rows = active_rows[start_idx:end_idx]
 
         builder = InlineKeyboardBuilder()
-        for actual_row_id, row in page_rows:
-            builder.button(text=f"{row[1] if len(row)>1 else '-'} | {row[2] if len(row)>2 else '-'}", callback_data=f"view_{actual_row_id}")
+        for actual_row_id, label in page_rows:
+            builder.button(text=label, callback_data=f"view_{actual_row_id}")
         builder.adjust(1)
         
         nav_buttons = []
@@ -1043,7 +1042,7 @@ async def api_live_calc(request):
 def get_main_menu_keyboard(user_id=None):
     rows = [
         [KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [KeyboardButton(text="📂 Мої заявки"), KeyboardButton(text="🔐 Кабінет менеджера")],
+        [KeyboardButton(text="📂 Мої заявки")],
     ]
     if user_id and is_admin(user_id):
         rows.append([KeyboardButton(text="⚙️ Адмін-панель")])
@@ -1138,7 +1137,8 @@ async def revoke_access(callback: CallbackQuery):
     if callback.from_user.id != MASTER_ADMIN_ID: return
     if remove_authorized_user(callback.data.split("_")[1]): await callback.answer("✅ Доступ скасовано!", show_alert=True)
 
-@dp.message(F.text == "🔐 Кабінет менеджера")
+# /admin — прихований вхід у старий список (через фасад -> Postgres).
+# Кнопку «Кабінет менеджера» прибрано з меню: її повністю замінює «Мої заявки».
 @dp.message(Command("admin"))
 async def open_admin_panel(message: Message):
     if not is_authorized(message.from_user.id): return

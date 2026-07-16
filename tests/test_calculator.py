@@ -226,7 +226,7 @@ def test_save_never_writes_to_header_row(monkeypatch):
     існуючі рядки. Реальний інцидент: append_row вирішив, що таблиця порожня,
     записав заявку в рядок 1 і знищив заголовки — заявка стала невидимою,
     бо весь код читає дані з рядка 2."""
-    import main
+    import storage_sheets
 
     written = {}
 
@@ -240,8 +240,8 @@ def test_save_never_writes_to_header_row(monkeypatch):
         def add_rows(self, n):
             pass
 
-    monkeypatch.setattr(main, "_get_google_sheet", lambda: FakeSheet())
-    main._save_to_sheet_sync({"client": {"name": "X", "area": "10"},
+    monkeypatch.setattr(storage_sheets, "_get_google_sheet", lambda: FakeSheet())
+    storage_sheets._save_to_sheet_sync({"client": {"name": "X", "area": "10"},
                               "answers": {}, "manager_id": "1", "source": "manager"})
 
     row = int(written["range"].split(":")[0][1:])
