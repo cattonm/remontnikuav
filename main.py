@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import sys
-import math
 import re
 import html
 import time
@@ -29,7 +28,7 @@ from google.oauth2.service_account import Credentials
 
 from security import (ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users,
                       add_authorized_user, remove_authorized_user, clear_auth_cache,
-                      ROLE_ADMIN, ROLE_MANAGER, get_role, is_admin, create_invite, redeem_invite)
+                      ROLE_ADMIN, ROLE_MANAGER, get_role, create_invite, redeem_invite)
 from lexicon import GEMINI_PROMPT, MSG_START_AUTH, MSG_START_MAIN, MSG_AUTH_SUCCESS, MSG_AUTH_FAIL, MSG_ACCESS_DENIED, MSG_ACCESS_DENIED_ALERT
 from calculator import calculate_budget, apply_virtual_measurements
 
@@ -56,12 +55,12 @@ from config import (
 from storage import (
     _log_action_sync, async_log_action, _get_google_sheet, _ensure_header_sync,
     async_ensure_header, _save_to_sheet_sync, _update_row_sync, _get_row_data_sync,
-    _row_meta, invalidate_orders_cache, _fetch_orders_rows_sync, _meta_from_parts,
+    _row_meta, invalidate_orders_cache, _fetch_orders_rows_sync,
     _list_orders_sync, _set_deal_status_sync, _soft_delete_sync, _purge_rows_sync,
     _list_trash_sync, async_soft_delete, async_purge_rows, async_list_trash,
-    async_list_orders, async_set_deal_status, _delete_row_sync, _save_report_sync,
+    async_list_orders, async_set_deal_status, _save_report_sync,
     async_save_to_sheet, async_update_row, async_get_row_data, async_save_report,
-    async_delete_row, _prices_bootstrap_sheet, _get_prices_sync, get_price_labels,
+    _prices_bootstrap_sheet, _get_prices_sync, get_price_labels,
     async_get_prices, _drafts_ws, _save_draft_sync, _get_draft_sync, _delete_draft_sync,
     _scan_drafts_for_reminders_sync, _mark_reminded_sync,
     DRAFTS_SHEET_NAME, DRAFT_REMIND_AFTER_H, DRAFT_TTL_DAYS,
@@ -276,41 +275,6 @@ SOURCE_LABELS = {"manager": "👔 Менеджер", "web": "🌐 Сайт (са
 
 
 
-def _get_orders_keyboard_sync(page=1):
-    # Читаємо через фасад сховища (Postgres або Sheets — залежно від
-    # STORAGE_BACKEND), а НЕ напряму з Google. Раніше цей список ходив у
-    # таблицю в обхід фасаду, тож у postgres-режимі показував старі заявки.
-    try:
-        active_rows = []
-        for entry in _fetch_orders_rows_sync():
-            m = _meta_from_parts(entry)
-            if m["status"] == "активна":
-                active_rows.append((m["row"], f"{m['name'] or '-'} | {m['phone'] or '-'}"))
-
-        total_active = len(active_rows)
-        per_page = 10
-        total_pages = math.ceil(total_active / per_page) if total_active > 0 else 1
-        if page < 1: page = 1
-        if page > total_pages: page = total_pages
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        page_rows = active_rows[start_idx:end_idx]
-
-        builder = InlineKeyboardBuilder()
-        for actual_row_id, label in page_rows:
-            builder.button(text=label, callback_data=f"view_{actual_row_id}")
-        builder.adjust(1)
-        
-        nav_buttons = []
-        if page > 1: nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-        nav_buttons.append(InlineKeyboardButton(text=f"Стор. {page}/{total_pages}", callback_data="ignore"))
-        if page < total_pages: nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
-        if total_active > per_page: builder.row(*nav_buttons)
-        builder.row(InlineKeyboardButton(text="🔄 Оновити список", callback_data=f"page_{page}"))
-        return builder.as_markup()
-    except: return None
-
-async def async_get_orders_keyboard(page=1): return await asyncio.to_thread(_get_orders_keyboard_sync, page)
 
 # ЄДИНЕ ДЖЕРЕЛО ПРАВДИ (fallback): ціни Стандарт (мін) і Преміум (макс).
 # Ці значення використовуються, якщо аркуш "Ціни" в Google-таблиці ще не
@@ -1183,118 +1147,6 @@ async def revoke_access(callback: CallbackQuery):
     if callback.from_user.id != MASTER_ADMIN_ID: return
     if remove_authorized_user(callback.data.split("_")[1]): await callback.answer("✅ Доступ скасовано!", show_alert=True)
 
-# /admin — прихований вхід у старий список (через фасад -> Postgres).
-# Кнопку «Кабінет менеджера» прибрано з меню: її повністю замінює «Мої заявки».
-@dp.message(Command("admin"))
-async def open_admin_panel(message: Message):
-    if not is_authorized(message.from_user.id): return
-    kb = await async_get_orders_keyboard(page=1)
-    await message.answer("📂 **Список активних заявок:**", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("page_"))
-async def change_page(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return
-    await callback.message.edit_text("📂 **Список заявок:**", reply_markup=await async_get_orders_keyboard(int(callback.data.split("_")[1])))
-
-@dp.callback_query(F.data == "show_list")
-async def show_first_page(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return
-    await callback.message.edit_text("📂 **Список заявок:**", reply_markup=await async_get_orders_keyboard(1))
-
-@dp.callback_query(F.data == "ignore")
-async def ignore_callback(callback: CallbackQuery): await callback.answer()
-
-@dp.callback_query(F.data.startswith("view_"))
-async def view_order(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return
-    row_id = int(callback.data.split("_")[1])
-    row_data = await async_get_row_data(row_id)
-    if not row_data: return
-    existing_report = row_data[6] if len(row_data) > 6 else ""
-    text = f"👤 **Клієнт:** {row_data[1]}\n📞 **Телефон:** `{row_data[2]}`\n🏠 **Об'єкт:** {row_data[3]}\n📍 **Адреса:** {row_data[4]}"
-    kb = InlineKeyboardBuilder()
-    if existing_report and len(existing_report) > 10: kb.button(text="📂 Відкрити ТЗ", callback_data=f"showrep_{row_id}")
-    else: kb.button(text="✨ Згенерувати ТЗ", callback_data=f"gen_{row_id}")
-    kb.button(text="💰 Прорахувати кошторис", callback_data=f"calc_{row_id}")
-    kb.button(text="✏️ Редагувати анкету", web_app=WebAppInfo(url=f"{WEBAPP_URL}?edit_id={row_id}"))
-    kb.button(text="🗑 Видалити заявку", callback_data=f"del_{row_id}")
-    kb.button(text="🔙 Назад", callback_data="show_list")
-    kb.adjust(1)
-    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("showrep_"))
-async def show_saved_report(callback: CallbackQuery):
-    row_id = int(callback.data.split("_")[1])
-    row_data = await async_get_row_data(row_id)
-    report = row_data[6] if row_data and len(row_data) > 6 else ""
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Перегенерувати", callback_data=f"gen_{row_id}")
-    kb.button(text="🔙 Назад", callback_data=f"view_{row_id}")
-    kb.adjust(1)
-    await callback.message.edit_text(f"📋 <b>ЗВІТ:</b>\n\n{report}", reply_markup=kb.as_markup(), parse_mode="HTML")
-
-@dp.callback_query(F.data.startswith("gen_"))
-async def generate_report_action(callback: CallbackQuery):
-    if is_throttled(callback.from_user.id, "generate_tz", delay=12): return await callback.answer("⏳ Зачекайте!", show_alert=True)
-    row_id = int(callback.data.split("_")[1])
-    await callback.message.answer("⏳ **Генеруємо ТЗ...**")
-    try:
-        raw_answers = (await async_get_row_data(row_id))[5]
-        for attempt in range(3):
-            try:
-                response = await model.generate_content_async(GEMINI_PROMPT.format(raw_answers=raw_answers))
-                report_text = response.text.replace("```html", "").replace("```", "").strip()
-                break
-            except:
-                if attempt == 2: raise
-                await asyncio.sleep(1)
-        await async_save_report(row_id, report_text)
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔙 Назад", callback_data=f"view_{row_id}")
-        await callback.message.answer(f"📋 <b>ПАСПОРТ</b>\n\n{report_text}", reply_markup=kb.as_markup(), parse_mode="HTML")
-        await async_log_action(callback.from_user.full_name, f"✨ Згенерував ТЗ (Рядок {row_id})")
-    except Exception as e: await callback.message.answer(f"❌ Помилка: {str(e)}")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("calc_"))
-async def run_calculation(callback: CallbackQuery):
-    if is_throttled(callback.from_user.id, "calc", delay=3): return await callback.answer("⏳ Рахуємо...", show_alert=True)
-    row_id = int(callback.data.split("_")[1])
-    await callback.answer("Аналізуємо... ⏳")
-    try:
-        data_json = json.loads((await async_get_row_data(row_id))[5])
-        prices = await async_get_prices()
-        b = calculate_budget(data_json, prices)
-        c = b["costs"]
-        text = f"💰 **ДЕТАЛЬНИЙ КОШТОРИС**\n\n"
-        if c["rough"][0] > 0: text += f"🧱 **Чорнові та Демонтаж:**\nРобота: {c['rough'][0]:,.0f} ₴ | Матеріали: ~{c['rough'][1]:,.0f} ₴\n\n"
-        text += f"⚡️ **Електрика:**\nРобота: {c['electric'][0]:,.0f} ₴ | Матеріали: ~{c['electric'][1]:,.0f} ₴\n\n"
-        if c["doors"][0] > 0: text += f"🚪 **Двері:**\nРобота: {c['doors'][0]:,.0f} ₴ | Матеріали: {c['doors'][1]:,.0f} - {c['doors'][2]:,.0f} ₴\n\n"
-        text += f"🛋 **Оздоблення кімнат:**\nРобота: {c['rooms'][0]:,.0f} ₴ | Матеріали: {c['rooms'][1]:,.0f} - {c['rooms'][2]:,.0f} ₴\n\n"
-        if c["baths"][0] > 0: text += f"🛁 **Санвузли:**\nРобота: {c['baths'][0]:,.0f} ₴ | Матеріали: {c['baths'][1]:,.0f} - {c['baths'][2]:,.0f} ₴\n\n"
-        
-        if c.get("custom", [0])[0] > 0 or c.get("custom", [0,0,0])[1] > 0: 
-            text += f"⭐️ **НЕСТАНДАРТНІ РОБОТИ:**\nРобота: {c['custom'][0]:,.0f} ₴ | Матеріали: ~{c['custom'][1]:,.0f} ₴\n\n"
-            
-        text += f"📊 **ПІДСУМКОВИЙ БЮДЖЕТ:**\n🛠 **Робота:** ~{b['total_work']:,.0f} ₴\n📦 **Матеріали:** від {b['total_mat_min']:,.0f} ₴ до {b['total_mat_max']:,.0f} ₴"
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔙 Назад", callback_data=f"view_{row_id}")
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-        await async_log_action(callback.from_user.full_name, f"💰 Прорахував кошторис (Рядок {row_id})")
-    except Exception as e: await callback.message.answer(f"❌ Помилка: {str(e)}")
-
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_order(callback: CallbackQuery):
-    row_id = int(callback.data.split("_")[1])
-    success, error_msg = await async_delete_row(row_id, callback.from_user.full_name)
-    if success:
-        await callback.answer("✅ В Кошику!", show_alert=True)
-        await callback.message.edit_text("📂 **Список заявок:**", reply_markup=await async_get_orders_keyboard(1))
-        await async_log_action(callback.from_user.full_name, f"🗑 ВИДАЛИВ заявку (Рядок {row_id})")
-    else:
-        await notify_admin_about_error(f"Видалення заявки (ID: {row_id})", error_msg)
-        await callback.answer("⚠️ Помилка видалення!", show_alert=True)
-
 @dp.message(F.content_type == ContentType.WEB_APP_DATA)
 async def web_app_data_handler(message: Message):
     if not is_authorized(message.from_user.id): return await message.answer(MSG_ACCESS_DENIED)
@@ -1311,239 +1163,11 @@ async def web_app_data_handler(message: Message):
         await notify_admin_about_error(f"Збереження заявки від {message.from_user.full_name}", error_msg)
         await message.answer("⚠️ Помилка збереження. Адміністратора повідомлено.")
 
-# ==========================================================
-# «МОЇ ЗАЯВКИ»: воронка менеджера
-# ----------------------------------------------------------
-# Раніше кабінет показував просто «активні заявки» — без авторства, без
-# статусу угоди і без пошуку. Тепер це справжня воронка:
-#   🆕 Нова → 📤 КП відправлено → ✅ Виграна / ❌ Програна
-# Менеджер бачить свої заявки + вільні ліди з сайту; адмін — усі.
-# ==========================================================
-ORDERS_PER_PAGE = 8
-
-def _fmt_order_line(m):
-    src = "🌐" if m["source"] == "web" else "👔"
-    free = " · 🔥вільний" if (m["source"] == "web" and not m["manager_id"]) else ""
-    return f"{DEAL_STATUSES[m['deal']].split()[0]}{src} {m['name'] or 'Без імені'}{free}"
-
-async def _orders_view(user_id, deal_filter=None, query=None, page=1):
-    role = get_role(user_id)
-    orders = await async_list_orders(user_id, role, deal_filter, query)
-    kb = InlineKeyboardBuilder()
-
-    # Рядок фільтрів: лічильники по кожному статусу
-    all_orders = await async_list_orders(user_id, role, None, query)
-    counts = {k: sum(1 for o in all_orders if o["deal"] == k) for k in DEAL_STATUSES}
-    for key, label in DEAL_STATUSES.items():
-        mark = "•" if deal_filter == key else ""
-        kb.button(text=f"{mark}{label.split()[0]} {counts[key]}", callback_data=f"of_{key}")
-    kb.button(text=("•📋 Усі" if not deal_filter else "📋 Усі"), callback_data="of_all")
-    kb.adjust(4, 1)
-
-    total_pages = max(1, (len(orders) + ORDERS_PER_PAGE - 1) // ORDERS_PER_PAGE)
-    page = max(1, min(page, total_pages))
-    chunk = orders[(page - 1) * ORDERS_PER_PAGE: page * ORDERS_PER_PAGE]
-    for m in chunk:
-        kb.row(InlineKeyboardButton(text=_fmt_order_line(m), callback_data=f"od_{m['row']}"))
-
-    nav = []
-    if page > 1:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"op_{page-1}_{deal_filter or 'all'}"))
-    if page < total_pages:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"op_{page+1}_{deal_filter or 'all'}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(InlineKeyboardButton(text="🔍 Пошук", callback_data="osearch"))
-
-    who = "усі заявки компанії" if role == ROLE_ADMIN else "ваші заявки + вільні ліди"
-    head = f"📂 *Заявки* ({who})\nЗнайдено: {len(orders)}"
-    if query:
-        head += f"\n🔍 Пошук: «{html.escape(query)}»"
-    return head, kb.as_markup()
-
-@dp.message(F.text == "📂 Мої заявки")
-@dp.message(Command("orders"))
-async def cmd_my_orders(message: Message):
-    if not is_authorized(message.from_user.id): return
-    text, kb = await _orders_view(message.from_user.id)
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("of_"))
-async def orders_filter(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer()
-    key = callback.data[3:]
-    text, kb = await _orders_view(callback.from_user.id, None if key == "all" else key)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("op_"))
-async def orders_page(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer()
-    _, page, key = callback.data.split("_", 2)
-    text, kb = await _orders_view(callback.from_user.id, None if key == "all" else key, page=int(page))
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("od_"))
-async def order_detail(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer()
-    row_id = int(callback.data[3:])
-    row = await async_get_row_data(row_id)
-    if not row:
-        return await callback.answer("Заявку не знайдено", show_alert=True)
-    m = _row_meta(row)
-
-    # Рахуємо суму на льоту — щоб менеджер бачив вагу угоди одразу в списку
-    total_txt = ""
-    try:
-        payload = json.loads(row[5])
-        prices = await async_get_prices()
-        b = calculate_budget(apply_virtual_measurements(payload), prices, labels=get_price_labels())
-        total_txt = f"\n💰 Кошторис: *{round(b['total_work'] + b['total_mat_min']):,} ₴*".replace(",", " ")
-    except Exception:
-        pass
-
-    owner = "—"
-    if m["manager_id"]:
-        owner = get_all_authorized_users().get(m["manager_id"], {}).get("name", m["manager_id"])
-    elif m["source"] == "web":
-        owner = "🔥 вільний лід"
-
-    text = (f"{DEAL_STATUSES[m['deal']]}  ·  {SOURCE_LABELS.get(m['source'], m['source'])}\n\n"
-            f"👤 *{html.escape(m['name'])}*\n📞 `{html.escape(m['phone'])}`\n"
-            f"🏠 {html.escape(m['address'])}\n📅 {m['date']}\n👔 Менеджер: {html.escape(str(owner))}{total_txt}")
-
-    kb = InlineKeyboardBuilder()
-    if WEBAPP_URL:
-        kb.row(InlineKeyboardButton(text="✏️ Редагувати анкету",
-                                    web_app=WebAppInfo(url=f"{WEBAPP_URL}?edit_id={row_id}")))
-    # Кнопки статусів — окрім поточного
-    status_btns = [InlineKeyboardButton(text=label, callback_data=f"os_{row_id}_{key}")
-                   for key, label in DEAL_STATUSES.items() if key != m["deal"]]
-    kb.row(*status_btns[:2])
-    if len(status_btns) > 2:
-        kb.row(*status_btns[2:])
-    if m["source"] == "web" and not m["manager_id"]:
-        kb.row(InlineKeyboardButton(text="🙋 Взяти в роботу", callback_data=f"oc_{row_id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ До списку", callback_data="of_all"))
-    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("os_"))
-async def order_set_status(callback: CallbackQuery):
-    if not is_authorized(callback.from_user.id): return await callback.answer()
-    _, row_id, deal = callback.data.split("_", 2)
-    if deal not in DEAL_STATUSES:
-        return await callback.answer()
-    await async_set_deal_status(row_id, deal)
-    await async_log_action(callback.from_user.full_name, f"🔄 Статус заявки {row_id} → {DEAL_STATUSES[deal]}")
-    await callback.answer(f"Статус: {DEAL_STATUSES[deal]}")
-    callback.data = f"od_{row_id}"
-    await order_detail(callback)
-
-@dp.callback_query(F.data.startswith("oc_"))
-async def order_claim(callback: CallbackQuery):
-    """Менеджер забирає вільний лід із сайту собі."""
-    if not is_authorized(callback.from_user.id): return await callback.answer()
-    row_id = callback.data[3:]
-    await async_set_deal_status(row_id, "new", claim_by=callback.from_user.id)
-    await async_log_action(callback.from_user.full_name, f"🙋 Взяв у роботу лід із сайту (рядок {row_id})")
-    await callback.answer("Лід ваш — успіхів!", show_alert=True)
-    callback.data = f"od_{row_id}"
-    await order_detail(callback)
-
-@dp.callback_query(F.data == "osearch")
-async def order_search_prompt(callback: CallbackQuery):
-    _SEARCH_WAIT.add(callback.from_user.id)
-    await callback.message.answer("🔍 Надішліть ім'я, телефон або адресу для пошуку:")
-    await callback.answer()
-
-_SEARCH_WAIT = set()      # хто зараз вводить пошуковий запит
-
-# ==========================================================
-# АДМІН-ПАНЕЛЬ: керування менеджерами через інвайт-коди
-# ==========================================================
-@dp.message(F.text == "⚙️ Адмін-панель")
-@dp.message(Command("admin_panel"))
-async def cmd_admin_panel(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    users = get_all_authorized_users()
-    managers = {u: i for u, i in users.items() if i.get("role") != ROLE_ADMIN}
-    admins = {u: i for u, i in users.items() if i.get("role") == ROLE_ADMIN}
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="➕ Створити код для менеджера", callback_data="inv_manager"))
-    kb.row(InlineKeyboardButton(text="👥 Менеджери та доступи", callback_data="inv_list"))
-    kb.row(InlineKeyboardButton(text="📊 Статистика воронки", callback_data="inv_stats"))
-    await message.answer(
-        f"⚙️ *Адмін-панель*\n\nАдміністраторів: {len(admins)}\nМенеджерів: {len(managers)}\n\n"
-        f"_Доступ видається одноразовим кодом — паролі не використовуються._",
-        reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "inv_manager")
-async def admin_create_invite(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer()
-    code = await asyncio.to_thread(create_invite, callback.from_user.id, ROLE_MANAGER)
-    if not code:
-        return await callback.answer("Не вдалося створити код", show_alert=True)
-    await callback.message.answer(
-        f"🎟 *Код доступу для менеджера*\n\n`{code}`\n\n"
-        f"Надішліть його людині. Вона відкриває бота і просто надсилає цей код повідомленням.\n"
-        f"Код одноразовий і діє 7 днів.", parse_mode="Markdown")
-    await callback.answer("Код створено")
-
-@dp.callback_query(F.data == "inv_list")
-async def admin_list_users(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer()
-    users = get_all_authorized_users(force_refresh=True)
-    kb = InlineKeyboardBuilder()
-    lines = []
-    for uid, info in users.items():
-        badge = "👑" if info.get("role") == ROLE_ADMIN else "👔"
-        lines.append(f"{badge} {info.get('name', '—')} (@{info.get('username', '—')})")
-        if str(uid) != str(MASTER_ADMIN_ID):
-            kb.row(InlineKeyboardButton(text=f"❌ Забрати доступ: {info.get('name', uid)}",
-                                        callback_data=f"revoke_{uid}"))
-    await callback.message.answer("👥 *Доступи:*\n\n" + "\n".join(lines),
-                                  reply_markup=kb.as_markup(), parse_mode="Markdown")
-    await callback.answer()
-
-@dp.callback_query(F.data == "inv_stats")
-async def admin_stats(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer()
-    orders = await async_list_orders(callback.from_user.id, ROLE_ADMIN)
-    if not orders:
-        await callback.message.answer("Заявок поки немає.")
-        return await callback.answer()
-    by_status = {k: sum(1 for o in orders if o["deal"] == k) for k in DEAL_STATUSES}
-    web_n = sum(1 for o in orders if o["source"] == "web")
-    by_mgr = {}
-    users = get_all_authorized_users()
-    for o in orders:
-        if not o["manager_id"]:
-            continue
-        nm = users.get(o["manager_id"], {}).get("name", o["manager_id"])
-        by_mgr[nm] = by_mgr.get(nm, 0) + 1
-    won, lost = by_status["won"], by_status["lost"]
-    conv = f"{won * 100 // max(1, won + lost)}%" if (won + lost) else "—"
-    text = ("📊 *Статистика воронки*\n\n" +
-            "\n".join(f"{DEAL_STATUSES[k]}: *{v}*" for k, v in by_status.items()) +
-            f"\n\n🌐 З сайту: *{web_n}* із {len(orders)}\n🎯 Конверсія (виграні/закриті): *{conv}*\n\n" +
-            "*По менеджерах:*\n" + ("\n".join(f"👔 {n}: {c}" for n, c in sorted(by_mgr.items(), key=lambda x: -x[1])) or "—"))
-    await callback.message.answer(text, parse_mode="Markdown")
-    await callback.answer()
-
 @dp.message(F.text)
 async def process_password_attempts(message: Message):
-    # 1) Авторизований і зараз вводить пошуковий запит по заявках
-    if message.from_user.id in _SEARCH_WAIT:
-        _SEARCH_WAIT.discard(message.from_user.id)
-        text, kb = await _orders_view(message.from_user.id, query=message.text)
-        return await message.answer(text, reply_markup=kb, parse_mode="Markdown")
-
     if is_authorized(message.from_user.id): return
 
-    # 2) Неавторизований: пробуємо як ОДНОРАЗОВИЙ ІНВАЙТ-КОД.
+    # Неавторизований: пробуємо як ОДНОРАЗОВИЙ ІНВАЙТ-КОД.
     # Старий спільний ADMIN_PASSWORD лишається робочим лише для майстер-адміна
     # (щоб ти не втратив доступ, якщо таблиця з ролями раптом ляже).
     code = (message.text or "").strip()
