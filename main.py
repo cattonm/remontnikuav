@@ -49,16 +49,16 @@ from config import (
     GROUP_CHAT_ID, WEB_SERVER_HOST, WEB_SERVER_PORT, WEBHOOK_URL,
     WEBHOOK_PATH, WEBAPP_URL, WEBHOOK_SECRET, SESSION_SECRET,
     _ALLOWED_ORIGINS, _require_env, DEFAULT_PRICES,
-    DEAL_STATUSES, SHEET_HEADER, PRICES_SHEET_NAME, _PRICES_HEADER,
+    SHEET_HEADER, PRICES_SHEET_NAME, _PRICES_HEADER,
 )
 # Доступ до сховища через фасад storage (Етап 3): sheets|postgres за env.
 from storage import (
     _log_action_sync, async_log_action, _get_google_sheet, _ensure_header_sync,
     async_ensure_header, _save_to_sheet_sync, _update_row_sync, _get_row_data_sync,
     _row_meta, invalidate_orders_cache, _fetch_orders_rows_sync,
-    _list_orders_sync, _set_deal_status_sync, _soft_delete_sync, _purge_rows_sync,
+    _list_orders_sync, _soft_delete_sync, _purge_rows_sync,
     _list_trash_sync, async_soft_delete, async_purge_rows, async_list_trash,
-    async_list_orders, async_set_deal_status, _save_report_sync,
+    async_list_orders, _save_report_sync,
     async_save_to_sheet, async_update_row, async_get_row_data, async_save_report,
     _prices_bootstrap_sheet, _get_prices_sync, get_price_labels,
     async_get_prices, _drafts_ws, _save_draft_sync, _get_draft_sync, _delete_draft_sync,
@@ -747,7 +747,6 @@ async def api_orders(request):
     uid, role = auth_request(request)
     if not uid:
         return web.json_response({"error": "unauthorized"}, status=401)
-    deal = request.query.get("deal") or None
     query = request.query.get("q") or None
     try:
         limit = max(1, min(int(request.query.get("limit", 20)), 100))
@@ -755,21 +754,15 @@ async def api_orders(request):
     except ValueError:
         limit, offset = 20, 0
 
-    orders = await async_list_orders(uid, role, deal, query)
+    orders = await async_list_orders(uid, role, None, query)
     users = get_all_authorized_users()
     page = orders[offset:offset + limit]
     for o in page:
         o["manager_name"] = users.get(o["manager_id"], {}).get("name", "") if o["manager_id"] else ""
 
-    # Лічильники по статусах рахуємо з ТОГО САМОГО кешу — без зайвих читань
-    all_for_counts = await async_list_orders(uid, role, None, query)
-    counts = {k: sum(1 for o in all_for_counts if o["deal"] == k) for k in DEAL_STATUSES}
-
     return web.json_response({
         "orders": page,
         "total": len(orders),
-        "counts": counts,
-        "all_total": len(all_for_counts),
         "role": role,
         "has_more": offset + limit < len(orders),
     })
@@ -872,26 +865,6 @@ async def api_generate_report(request):
     return web.json_response({"report": report_text})
 
 @cors
-async def api_order_status(request):
-    """Зміна статусу угоди / взяття вільного ліда в роботу."""
-    uid, role = auth_request(request)
-    if not uid:
-        return web.json_response({"error": "unauthorized"}, status=401)
-    try:
-        data = await request.json()
-        row = int(data.get("row"))
-        deal = str(data.get("deal") or "new")
-        if deal not in DEAL_STATUSES:
-            return web.json_response({"error": "bad_status"}, status=400)
-        claim = uid if data.get("claim") else None
-        await async_set_deal_status(row, deal, claim_by=claim)
-        await async_log_action(f"web:{uid}", f"🔄 Статус заявки {row} → {DEAL_STATUSES[deal]}")
-        return web.json_response({"success": True})
-    except Exception:
-        logging.exception("order_status failed")
-        return web.json_response({"error": "server_error"}, status=500)
-
-@cors
 async def api_admin_users(request):
     """Список доступів. Тільки для адміна."""
     uid, role = auth_request(request)
@@ -936,20 +909,15 @@ async def api_admin_stats(request):
         return web.json_response({"error": "forbidden"}, status=403)
     orders = await async_list_orders(uid, ROLE_ADMIN)
     users = get_all_authorized_users()
-    by_status = {k: sum(1 for o in orders if o["deal"] == k) for k in DEAL_STATUSES}
     by_mgr = {}
     for o in orders:
         if not o["manager_id"]:
             continue
         nm = users.get(o["manager_id"], {}).get("name", o["manager_id"])
         by_mgr[nm] = by_mgr.get(nm, 0) + 1
-    won, lost = by_status["won"], by_status["lost"]
     return web.json_response({
         "total": len(orders),
-        "by_status": by_status,
-        "labels": DEAL_STATUSES,
         "web_leads": sum(1 for o in orders if o["source"] == "web"),
-        "conversion": (won * 100 // (won + lost)) if (won + lost) else None,
         "by_manager": by_mgr,
     })
 
@@ -1247,8 +1215,6 @@ def main():
     app.router.add_options('/api/trash', api_trash)
     app.router.add_post('/api/purge', api_purge)
     app.router.add_options('/api/purge', api_purge)
-    app.router.add_post('/api/order_status', api_order_status)
-    app.router.add_options('/api/order_status', api_order_status)
     app.router.add_post('/api/create_order', api_create_order)
     app.router.add_options('/api/create_order', api_create_order)
     # Адмінка на сайті
