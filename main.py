@@ -859,7 +859,52 @@ async def api_order_detail(request):
         logging.exception("order_detail: не вдалося порахувати кошторис для рядка %s", row_id)
 
     m["manager_name"] = get_all_authorized_users().get(m["manager_id"], {}).get("name", "") if m["manager_id"] else ""
+    m["report"] = row[6] if len(row) > 6 else ""   # збережений ТЗ (для показу/перегенерації на сайті)
     return web.json_response({"order": m, "budget": budget, "rooms": rooms})
+
+@cors
+async def api_generate_report(request):
+    """Генерація ТЗ через Gemini для заявки (перенесено з бота на сайт).
+    Ті самі права, що й на перегляд деталей; результат зберігаємо в заявці."""
+    uid, role = auth_request(request)
+    if not uid:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        row_id = int(body.get("row"))
+    except Exception:
+        return web.json_response({"error": "bad_row"}, status=400)
+
+    row = await async_get_row_data(row_id)
+    if not row:
+        return web.json_response({"error": "not_found"}, status=404)
+    m = _row_meta(row)
+    if role != ROLE_ADMIN:
+        mine = m["manager_id"] == str(uid)
+        free_lead = (m["source"] == "web" and not m["manager_id"])
+        if not (mine or free_lead):
+            return web.json_response({"error": "forbidden"}, status=403)
+
+    if model is None:
+        return web.json_response({"error": "gemini_unavailable"}, status=503)
+
+    raw_answers = row[5]
+    report_text = ""
+    for attempt in range(3):
+        try:
+            resp = await model.generate_content_async(GEMINI_PROMPT.format(raw_answers=raw_answers))
+            report_text = resp.text.replace("```html", "").replace("```", "").strip()
+            break
+        except Exception:
+            if attempt == 2:
+                logging.exception("api_generate_report: Gemini не відповів для рядка %s", row_id)
+                return web.json_response({"error": "generation_failed"}, status=502)
+            await asyncio.sleep(1)
+
+    await async_save_report(row_id, report_text)
+    info = get_all_authorized_users().get(str(uid), {})
+    await async_log_action(info.get("name", f"web:{uid}"), f"✨ Згенерував ТЗ (Рядок {row_id})")
+    return web.json_response({"report": report_text})
 
 @cors
 async def api_order_status(request):
@@ -1040,13 +1085,13 @@ async def api_live_calc(request):
         return web.json_response({"error": "calc_failed"}, status=500)
 
 def get_main_menu_keyboard(user_id=None):
-    rows = [
-        [KeyboardButton(text="📝 Заповнити анкету", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [KeyboardButton(text="📂 Мої заявки")],
-    ]
-    if user_id and is_admin(user_id):
-        rows.append([KeyboardButton(text="⚙️ Адмін-панель")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+    # Бот став лаунчером: увесь функціонал (анкета, перегляд заявок, стата,
+    # коди доступу) живе на сайті / у Web App. У меню — одна кнопка, що його
+    # відкриває. Дублювання цих екранів у боті прибрано.
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🚀 Відкрити застосунок", web_app=WebAppInfo(url=WEBAPP_URL))]],
+        resize_keyboard=True,
+    )
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, command: CommandObject = None):
@@ -1566,6 +1611,8 @@ def main():
     app.router.add_options('/api/orders', api_orders)
     app.router.add_get('/api/order_detail', api_order_detail)
     app.router.add_options('/api/order_detail', api_order_detail)
+    app.router.add_post('/api/generate_report', api_generate_report)
+    app.router.add_options('/api/generate_report', api_generate_report)
     # Видалення: кошик → відновлення → остаточна чистка
     app.router.add_post('/api/order_delete', api_order_delete)
     app.router.add_options('/api/order_delete', api_order_delete)
