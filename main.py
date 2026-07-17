@@ -913,7 +913,7 @@ async def api_admin_stats(request):
     for o in orders:
         if not o["manager_id"]:
             continue
-        nm = users.get(o["manager_id"], {}).get("name", o["manager_id"])
+        nm = users.get(o["manager_id"], {}).get("name") or f"Менеджер #{o['manager_id']}"
         by_mgr[nm] = by_mgr.get(nm, 0) + 1
     return web.json_response({
         "total": len(orders),
