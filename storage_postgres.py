@@ -11,11 +11,13 @@ UI-логіка в main.py лишається незмінною:
 викликів. На нього ж покладено захист від подвійного збереження — унікальний
 частковий індекс по submission_id (див. schema.sql).
 
-Ціни навмисно НЕ переносяться в БД: бізнес редагує їх у Google-таблиці, тож
-_get_prices_sync / get_price_labels делегуються в storage_sheets як є.
+Ціни теж живуть тут (Етап A): таблиця prices, ключ (tenant_id, key). Джерело
+цін перемикається окремою змінною PRICES_BACKEND, незалежно від заявок, —
+щоб переносити прайс без ризику для решти.
 """
 import os
 import json
+import time
 import logging
 import asyncio
 from contextlib import contextmanager
@@ -28,9 +30,9 @@ from psycopg2.extras import Json
 # Спільне зі storage_sheets: чисті парсери (не звертаються в Google) і ціни.
 from storage_sheets import (
     _row_meta, _meta_from_parts,
-    _get_prices_sync, get_price_labels, async_get_prices, _prices_bootstrap_sheet,
     DRAFT_REMIND_AFTER_H, DRAFT_TTL_DAYS,
 )
+from config import DEFAULT_PRICES
 from security import ROLE_ADMIN
 
 # ── Підключення ───────────────────────────────────────────
@@ -348,3 +350,183 @@ async def async_set_deal_status(row_id, deal, claim_by=None):
 
 async def async_ensure_header():
     return await asyncio.to_thread(_ensure_header_sync)
+
+
+# ══════════════════════════════════════════════════════════
+# ЦІНИ (Етап A: прайс переїхав із Google-таблиці в БД)
+# ----------------------------------------------------------
+# Контракт навмисно ТОЙ САМИЙ, що й у storage_sheets, щоб calculator.py і
+# main.py не помітили підміни:
+#     _get_prices_sync() -> {price_key: [робота, матеріал_мін, матеріал_макс]}
+#     get_price_labels() -> {price_key: "Назва"}
+#
+# Логіка теж лишається «незламною»: база — DEFAULT_PRICES, поверх кладемо
+# рядки з БД. Впала база / порожня таблиця / кривий рядок — калькулятор
+# однаково рахує, просто на дефолтах. Прайс НЕ може обнулити кошторис.
+# ══════════════════════════════════════════════════════════
+TENANT_ID = int(os.getenv("TENANT_ID", "1"))   # Етап B: візьметься з сесії
+
+_PRICES_CACHE = None
+_PRICES_CACHE_TIME = 0
+_PRICES_CACHE_TTL = 300          # 5 хв, як було в Sheets
+_PRICE_LABELS = {}
+_PRICES_META = {"source": "default", "loaded_at": None, "count": 0}   # для /version
+
+
+def invalidate_prices_cache():
+    """Скинути кеш після редагування прайсу — щоб зміна була видна одразу,
+    а не через 5 хвилин."""
+    global _PRICES_CACHE, _PRICES_CACHE_TIME
+    _PRICES_CACHE = None
+    _PRICES_CACHE_TIME = 0
+
+
+def _get_prices_sync():
+    global _PRICES_CACHE, _PRICES_CACHE_TIME, _PRICE_LABELS
+    now = time.time()
+    if _PRICES_CACHE and (now - _PRICES_CACHE_TIME) < _PRICES_CACHE_TTL:
+        return _PRICES_CACHE
+
+    prices = dict(DEFAULT_PRICES)
+    labels = {}
+    source = "default"
+    try:
+        with _conn() as con, con.cursor() as cur:
+            cur.execute(
+                "SELECT key, label, work, mat_min, mat_max FROM prices "
+                "WHERE tenant_id = %s", (TENANT_ID,))
+            rows = cur.fetchall()
+        for key, label, work, mat_min, mat_max in rows:
+            key = (key or "").strip()
+            if not key:
+                continue
+            prices[key] = [float(work), float(mat_min), float(mat_max)]
+            if label:
+                labels[key] = label
+        if rows:
+            source = "postgres"
+        else:
+            # Таблиця порожня — прайс ще не імпортували. Це не помилка,
+            # але про неї треба знати з /version, а не гадати.
+            logging.warning("Таблиця prices порожня — працюю на DEFAULT_PRICES. "
+                            "Запусти: python import_prices.py")
+    except Exception as e:
+        logging.error("Не вдалося прочитати ціни з БД (%s). Використовую %s.",
+                      e, "кеш" if _PRICES_CACHE else "DEFAULT_PRICES")
+        if _PRICES_CACHE:
+            return _PRICES_CACHE
+
+    _PRICES_CACHE = prices
+    _PRICES_CACHE_TIME = now
+    _PRICE_LABELS = labels
+    _PRICES_META["source"] = source
+    _PRICES_META["loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _PRICES_META["count"] = len(prices)
+    return prices
+
+
+def get_price_labels():
+    return _PRICE_LABELS
+
+
+async def async_get_prices():
+    return await asyncio.to_thread(_get_prices_sync)
+
+
+# ── Редактор прайсу (API кабінету) ────────────────────────
+def _list_prices_sync():
+    """Повний прайс тенанта для UI-редактора: список словників, відсортований
+    за назвою. Ключі, яких ще немає в БД, підмішуються з DEFAULT_PRICES —
+    щоб редактор показував ВСІ позиції калькулятора, а не тільки збережені."""
+    from calculator import PRICE_META
+
+    saved = {}
+    try:
+        with _conn() as con, con.cursor() as cur:
+            cur.execute(
+                "SELECT key, label, unit, work, mat_min, mat_max, updated_at, updated_by "
+                "FROM prices WHERE tenant_id = %s", (TENANT_ID,))
+            for k, label, unit, w, m1, m2, upd, by in cur.fetchall():
+                saved[k] = {
+                    "key": k, "label": label, "unit": unit,
+                    "work": float(w), "mat_min": float(m1), "mat_max": float(m2),
+                    "updated_at": upd.strftime("%Y-%m-%d %H:%M") if upd else "",
+                    "updated_by": by or "", "saved": True,
+                }
+    except Exception as e:
+        logging.error("Не вдалося прочитати прайс для редактора: %s", e)
+        raise
+
+    out = []
+    for key, (w, m1, m2) in DEFAULT_PRICES.items():
+        if key in saved:
+            out.append(saved.pop(key))
+            continue
+        meta_label, meta_unit = PRICE_META.get(key, (key, ""))
+        out.append({"key": key, "label": meta_label, "unit": meta_unit,
+                    "work": float(w), "mat_min": float(m1), "mat_max": float(m2),
+                    "updated_at": "", "updated_by": "", "saved": False})
+    out.extend(saved.values())   # позиції, доданих вручну і яких немає в коді
+    out.sort(key=lambda r: (r["label"] or r["key"]).lower())
+    return out
+
+
+def _upsert_prices_sync(items, updated_by=""):
+    """Зберегти зміни прайсу. items — список {key, work, mat_min, mat_max, label?, unit?}.
+
+    Пише одним запитом на позицію в межах ОДНІЄЇ транзакції: або зберігається
+    все, або нічого. Некоректні числа відкидаються тут, до бази, — а сама база
+    ще й тримає CHECK-констрейнти як другий рубіж.
+    """
+    from calculator import PRICE_META
+
+    clean = []
+    for it in items or []:
+        key = str(it.get("key", "")).strip()
+        if not key:
+            continue
+        try:
+            work = round(float(it.get("work", 0) or 0), 2)
+            m1 = round(float(it.get("mat_min", 0) or 0), 2)
+            m2 = round(float(it.get("mat_max", 0) or 0), 2)
+        except (TypeError, ValueError):
+            raise ValueError(f"Некоректне число в позиції «{key}»")
+        if work < 0 or m1 < 0 or m2 < 0:
+            raise ValueError(f"Відʼємна ціна в позиції «{key}»")
+        if m2 < m1:
+            m1, m2 = m2, m1          # описка «макс < мін» — мовчки міняємо місцями
+        meta_label, meta_unit = PRICE_META.get(key, (key, ""))
+        clean.append((
+            TENANT_ID, key,
+            str(it.get("label") or meta_label).strip()[:200],
+            str(it.get("unit") or meta_unit).strip()[:20],
+            work, m1, m2, str(updated_by)[:64],
+        ))
+
+    if not clean:
+        return 0
+
+    with _conn() as con, con.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO prices (tenant_id, key, label, unit, work, mat_min, mat_max, updated_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, key) DO UPDATE SET
+                label = EXCLUDED.label,
+                unit = EXCLUDED.unit,
+                work = EXCLUDED.work,
+                mat_min = EXCLUDED.mat_min,
+                mat_max = EXCLUDED.mat_max,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+            """, clean)
+    invalidate_prices_cache()
+    return len(clean)
+
+
+async def async_list_prices():
+    return await asyncio.to_thread(_list_prices_sync)
+
+
+async def async_upsert_prices(items, updated_by=""):
+    return await asyncio.to_thread(_upsert_prices_sync, items, updated_by)
