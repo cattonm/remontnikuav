@@ -71,11 +71,16 @@ jobs:
       # (tests/test_security_pg.py) працюють зі справжніми таблицями і
       # без DATABASE_URL просто пропускаються. Саме тут перевіряється, що
       # інвайт неможливо погасити двічі.
-      - name: Тести (калькулятор, міграції, авторизація)
+      - name: Тести (калькулятор, міграції, авторизація, прайс)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ci
           BOT_TOKEN: '123456789:AAHfakeTokenForCiImportCheck_000000000'
+          GEMINI_API_KEY: 'fake'
           GOOGLE_CREDS_JSON: '{}'
+          RENDER_EXTERNAL_URL: 'https://example.onrender.com'
+          SESSION_SECRET: 'ci-secret'
+          PRICES_BACKEND: postgres
+          AUTH_BACKEND: postgres
         run: python -m pytest tests/ -q
 
       # Найважливіший крок: імітуємо старт на Render з фейковими env.

@@ -26,7 +26,8 @@ import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 
-from storage import STORAGE_BACKEND, PRICES_BACKEND
+from storage import (STORAGE_BACKEND, PRICES_BACKEND, PRICES_EDITABLE,
+                     async_list_prices, async_upsert_prices)
 from security import AUTH_BACKEND
 from security import (ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users,
                       add_authorized_user, remove_authorized_user, clear_auth_cache,
@@ -904,6 +905,73 @@ async def api_admin_revoke(request):
     return web.json_response({"success": True})
 
 @cors
+async def api_admin_prices(request):
+    """Прайс для редактора. Тільки адмін.
+
+    Віддає ВСІ позиції калькулятора, а не лише збережені в БД: якщо позиції
+    ще немає в таблиці prices, повертається значення з коду з прапорцем
+    saved=false. Інакше редактор показував би порожній список на свіжій базі.
+    """
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    if not PRICES_EDITABLE:
+        return web.json_response(
+            {"error": "read_only",
+             "message": "Ціни зараз беруться з Google-таблиці. Редагувати їх "
+                        "можна там, або перемкнути PRICES_BACKEND=postgres."},
+            status=409)
+    try:
+        items = await async_list_prices()
+    except Exception as e:
+        logging.error("Не вдалося віддати прайс редактору: %s", e)
+        return web.json_response({"error": "read_failed"}, status=500)
+    return web.json_response({"prices": items, "editable": True})
+
+
+@cors
+async def api_admin_prices_save(request):
+    """Збереження змінених позицій. Тільки адмін.
+
+    Фронт надсилає ЛИШЕ змінені рядки — так у журналі видно, що саме правили,
+    і випадковий «зберегти все» не переписує 83 позиції з тими самими числами.
+    """
+    uid, role = auth_request(request)
+    if role != ROLE_ADMIN:
+        return web.json_response({"error": "forbidden"}, status=403)
+    if not PRICES_EDITABLE:
+        return web.json_response({"error": "read_only"}, status=409)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+
+    items = data.get("items") or []
+    if not isinstance(items, list) or not items:
+        return web.json_response({"error": "empty"}, status=400)
+    if len(items) > 500:
+        return web.json_response({"error": "too_many"}, status=400)
+
+    try:
+        n = await async_upsert_prices(items, updated_by=str(uid))
+    except ValueError as e:
+        # Осмислена помилка валідації — показуємо людині як є.
+        return web.json_response({"error": "invalid", "message": str(e)}, status=400)
+    except Exception as e:
+        logging.error("Не вдалося зберегти прайс: %s", e)
+        return web.json_response({"error": "save_failed"}, status=500)
+
+    names = ", ".join(str(i.get("key", "")) for i in items[:5])
+    if len(items) > 5:
+        names += f" +{len(items) - 5}"
+    info = get_all_authorized_users().get(str(uid), {})
+    await async_log_action(info.get("name", f"web:{uid}"),
+                           f"💰 Змінив прайс ({n} поз.): {names}")
+    return web.json_response({"success": True, "saved": n})
+
+
+@cors
 async def api_admin_stats(request):
     """Воронка: статуси, джерела, зріз по менеджерах."""
     uid, role = auth_request(request)
@@ -1233,6 +1301,10 @@ def main():
     app.router.add_options('/api/admin/invite', api_admin_invite)
     app.router.add_post('/api/admin/revoke', api_admin_revoke)
     app.router.add_options('/api/admin/revoke', api_admin_revoke)
+    app.router.add_get('/api/admin/prices', api_admin_prices)
+    app.router.add_options('/api/admin/prices', api_admin_prices)
+    app.router.add_post('/api/admin/prices/save', api_admin_prices_save)
+    app.router.add_options('/api/admin/prices/save', api_admin_prices_save)
     app.router.add_get('/api/admin/stats', api_admin_stats)
     app.router.add_options('/api/admin/stats', api_admin_stats)
     # Публічний калькулятор: хто я + заявка від гостя
