@@ -112,6 +112,7 @@ def _load_from_csv(path):
 
 def _to_items(prices, labels):
     from calculator import PRICE_META
+    from config import DEFAULT_COMFORT_PRICES
     items = []
     for key, triple in prices.items():
         try:
@@ -125,6 +126,9 @@ def _to_items(prices, labels):
             "label": labels.get(key) or meta_label,
             "unit": meta_unit,
             "work": work, "mat_min": mat_min, "mat_max": mat_max,
+            # Ціна «Комфорт»: там, де вона не збігається з середнім, беремо
+            # дефолт із config. Порожньо = «рахувати як середнє».
+            "mat_mid": DEFAULT_COMFORT_PRICES.get(key),
         })
     return items
 

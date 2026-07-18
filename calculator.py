@@ -1,5 +1,9 @@
 import math
 
+# Дефолтні ціни рівня «Комфорт». Якщо в прайсі є власне значення
+# (четверте число), воно має пріоритет — див. add_c нижче.
+from config import DEFAULT_COMFORT_PRICES
+
 def _num(v, default=0.0):
     """Безпечний float: '15' → 15.0; '' / None / 'abc' → default.
     Раніше голий float() на кривому полі кидав ValueError, ендпоінт
@@ -127,18 +131,19 @@ def calculate_budget(data, prices, labels=None):
         is_comf = tier_norm in ["КОМФОРТ", "C", "К", "COMFORT"]
         is_prem = tier_norm in ["ПРЕМІУМ", "ПРЕМИУМ", "P", "П", "PREMIUM"]
 
-        m_c = (m1 + m2) / 2
-        overrides_c = {
-            "radiator": 6000, "ac": 27000, "bath_tub": 40000,
-            "toilet_okrem": 10000, "toilet_install": 22000,
-            "sink_cabinet": 20000, "boiler_100": 13800, "boiler_300": 13800, 
-            "towel_dryer": 7500, "hygienic_shower": 6000, "mirror_led": 5500,
-            "mixer_std": 6000, "mixer_hidden": 10000, "tech_washer": 25000,
-            "tech_kitchen": 18000, "tech_osmos": 15000,
-            "door_entrance_mdf": 30000, "door_entrance_armor": 30000
-        }
-        if price_key in overrides_c:
-            m_c = overrides_c[price_key]
+        # Ціна рівня «Комфорт», у порядку пріоритету:
+        #   1) четверте число прайсу — редагується в кабінеті (таблиця prices);
+        #   2) історичні значення нижче — потрібні, поки прайс береться з
+        #      Google-таблиці, де четвертого числа немає;
+        #   3) середнє між стандартом і преміумом.
+        # Раніше працював лише пункт 2, тому ці 18 цін можна було змінити
+        # тільки правкою коду і деплоєм.
+        m_c = p[3] if len(p) > 3 and p[3] is not None else None
+        if m_c is None:
+            m_c = DEFAULT_COMFORT_PRICES.get(price_key)
+        if m_c is None:
+            m_c = (m1 + m2) / 2
+        m_c = float(m_c)
 
         if price_key == "mirror_led" and tier_norm:
             if is_std: w = 600

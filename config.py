@@ -19,6 +19,24 @@ WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = "/webhook"
 WEBAPP_URL = "https://siteremontt.vercel.app"
 
+# Ціни рівня «Комфорт» для позицій, де середнє між стандартом і преміумом
+# дає неправильне число. Ванна: стандарт 15 000, преміум 100 000, середнє
+# 57 500 — а реальний комфорт 40 000.
+#
+# Це ДЕФОЛТИ для першого заповнення бази. Коли позиція має значення в
+# таблиці prices (колонка mat_mid), береться воно — його редагують у
+# кабінеті. Раніше ці числа жили просто в calculator.py, тож змінити їх
+# можна було лише правкою коду і деплоєм.
+DEFAULT_COMFORT_PRICES = {
+    "radiator": 6000, "ac": 27000, "bath_tub": 40000,
+    "toilet_okrem": 10000, "toilet_install": 22000,
+    "sink_cabinet": 20000, "boiler_100": 13800, "boiler_300": 13800,
+    "towel_dryer": 7500, "hygienic_shower": 6000, "mirror_led": 5500,
+    "mixer_std": 6000, "mixer_hidden": 10000, "tech_washer": 25000,
+    "tech_kitchen": 18000, "tech_osmos": 15000,
+    "door_entrance_mdf": 30000, "door_entrance_armor": 30000,
+}
+
 # --- Секрети: жодних публічних дефолтів у проді ---
 # Раніше WEBHOOK_SECRET мав дефолт 'DefaultSecretToken12345'. Якщо env не
 # заданий, вебхук був підписаний загальновідомим рядком — будь-хто міг

@@ -393,14 +393,17 @@ def _get_prices_sync():
     try:
         with _conn() as con, con.cursor() as cur:
             cur.execute(
-                "SELECT key, label, work, mat_min, mat_max FROM prices "
+                "SELECT key, label, work, mat_min, mat_max, mat_mid FROM prices "
                 "WHERE tenant_id = %s", (TENANT_ID,))
             rows = cur.fetchall()
-        for key, label, work, mat_min, mat_max in rows:
+        for key, label, work, mat_min, mat_max, mat_mid in rows:
             key = (key or "").strip()
             if not key:
                 continue
-            prices[key] = [float(work), float(mat_min), float(mat_max)]
+            # Четвертий елемент — ціна рівня «Комфорт». None означає
+            # «рахувати як середнє», і калькулятор це розуміє.
+            prices[key] = [float(work), float(mat_min), float(mat_max),
+                           None if mat_mid is None else float(mat_mid)]
             if label:
                 labels[key] = label
         if rows:
@@ -444,12 +447,13 @@ def _list_prices_sync():
     try:
         with _conn() as con, con.cursor() as cur:
             cur.execute(
-                "SELECT key, label, unit, work, mat_min, mat_max, updated_at, updated_by "
+                "SELECT key, label, unit, work, mat_min, mat_max, mat_mid, updated_at, updated_by "
                 "FROM prices WHERE tenant_id = %s", (TENANT_ID,))
-            for k, label, unit, w, m1, m2, upd, by in cur.fetchall():
+            for k, label, unit, w, m1, m2, mid, upd, by in cur.fetchall():
                 saved[k] = {
                     "key": k, "label": label, "unit": unit,
                     "work": float(w), "mat_min": float(m1), "mat_max": float(m2),
+                    "mat_mid": None if mid is None else float(mid),
                     "updated_at": upd.strftime("%Y-%m-%d %H:%M") if upd else "",
                     "updated_by": by or "", "saved": True,
                 }
@@ -465,6 +469,7 @@ def _list_prices_sync():
         meta_label, meta_unit = PRICE_META.get(key, (key, ""))
         out.append({"key": key, "label": meta_label, "unit": meta_unit,
                     "work": float(w), "mat_min": float(m1), "mat_max": float(m2),
+                    "mat_mid": None,
                     "updated_at": "", "updated_by": "", "saved": False})
     out.extend(saved.values())   # позиції, доданих вручну і яких немає в коді
     out.sort(key=lambda r: (r["label"] or r["key"]).lower())
@@ -495,12 +500,27 @@ def _upsert_prices_sync(items, updated_by=""):
             raise ValueError(f"Відʼємна ціна в позиції «{key}»")
         if m2 < m1:
             m1, m2 = m2, m1          # описка «макс < мін» — мовчки міняємо місцями
+
+        # Комфорт: порожнє поле = «рахувати як середнє». Значення поза
+        # діапазоном підтягуємо до межі, інакше рівні переплутаються місцями.
+        raw_mid = it.get("mat_mid", "")
+        if raw_mid in (None, "", "auto"):
+            mid = None
+        else:
+            try:
+                mid = round(float(raw_mid), 2)
+            except (TypeError, ValueError):
+                raise ValueError(f"Некоректна ціна «Комфорт» у позиції «{key}»")
+            if mid < 0:
+                raise ValueError(f"Відʼємна ціна «Комфорт» у позиції «{key}»")
+            mid = min(max(mid, m1), m2)
+
         meta_label, meta_unit = PRICE_META.get(key, (key, ""))
         clean.append((
             TENANT_ID, key,
             str(it.get("label") or meta_label).strip()[:200],
             str(it.get("unit") or meta_unit).strip()[:20],
-            work, m1, m2, str(updated_by)[:64],
+            work, m1, m2, mid, str(updated_by)[:64],
         ))
 
     if not clean:
@@ -509,14 +529,15 @@ def _upsert_prices_sync(items, updated_by=""):
     with _conn() as con, con.cursor() as cur:
         cur.executemany(
             """
-            INSERT INTO prices (tenant_id, key, label, unit, work, mat_min, mat_max, updated_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO prices (tenant_id, key, label, unit, work, mat_min, mat_max, mat_mid, updated_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (tenant_id, key) DO UPDATE SET
                 label = EXCLUDED.label,
                 unit = EXCLUDED.unit,
                 work = EXCLUDED.work,
                 mat_min = EXCLUDED.mat_min,
                 mat_max = EXCLUDED.mat_max,
+                mat_mid = EXCLUDED.mat_mid,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = now()
             """, clean)
