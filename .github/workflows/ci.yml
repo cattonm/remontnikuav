@@ -16,6 +16,20 @@ jobs:
     name: Синтаксис · Імпорт · Тести
     runs-on: ubuntu-latest
 
+    # Одноразовий Postgres для перевірки міграцій. Живе стільки ж, скільки джоба.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +49,26 @@ jobs:
 
       - name: Тести калькулятора
         run: python -m pytest tests/ -q
+
+      # Міграції ганяємо на СПРАВЖНЬОМУ Postgres (сервіс нижче).
+      # Ловить: битий SQL, порушений порядок, неідемпотентний накат.
+      # Двічі підряд — бо на проді база вже непорожня, і повторний
+      # накат мусить бути безпечним.
+      - name: Міграції БД (чистий накат + повтор)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ci
+        run: |
+          python migrate.py up
+          python migrate.py up
+          python migrate.py status
+
+      # Прайс мусить лягати в БД і збігатися з кодом до копійки.
+      - name: Імпорт прайсу в БД і звірка
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ci
+        run: |
+          python import_prices.py --from-defaults
+          python import_prices.py --from-defaults --check
 
       # Найважливіший крок: імітуємо старт на Render з фейковими env.
       # Саме тут ловиться "забув закомітити модуль" — той самий баг,

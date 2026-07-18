@@ -10,9 +10,14 @@ main.py імпортує все звідси, не знаючи, яке схов
 не виставиш STORAGE_BACKEND=postgres. Це ж дає миттєвий відкіт: якщо з базою
 щось не так — прибираєш змінну, і все повертається на Sheets без деплою коду.
 
-Ціни (get_price_labels / async_get_prices) і читання сирого аркуша
-(_get_google_sheet, для адмін-бекапу) ЗАВЖДИ беруться зі storage_sheets —
-бізнес редагує ціни в таблиці незалежно від бекенду заявок.
+Ціни мають ОКРЕМИЙ перемикач, бо це окремий ризик:
+
+    PRICES_BACKEND=sheets     (за замовчуванням) — прайс із Google-таблиці;
+    PRICES_BACKEND=postgres                      — прайс із таблиці prices.
+
+Розділено навмисно: заявки вже давно в Postgres, а прайс переносимо зараз, і
+якщо з ним щось піде не так — прибираєш одну змінну, і ціни знову з аркуша,
+без відкату заявок і без деплою.
 """
 import os
 import logging
@@ -51,3 +56,35 @@ if STORAGE_BACKEND == "postgres":
         _save_draft_sync, _get_draft_sync, _delete_draft_sync,
         _scan_drafts_for_reminders_sync, _mark_reminded_sync,
     )
+
+
+# ── Ціни: незалежний перемикач ────────────────────────────
+PRICES_BACKEND = os.getenv("PRICES_BACKEND", "sheets").lower()
+
+if PRICES_BACKEND == "postgres":
+    logging.info("PRICES_BACKEND=postgres — прайс із таблиці prices")
+    from storage_postgres import (
+        _get_prices_sync, get_price_labels, async_get_prices, _PRICES_META,
+        _list_prices_sync, _upsert_prices_sync, async_list_prices,
+        async_upsert_prices, invalidate_prices_cache,
+    )
+    PRICES_EDITABLE = True          # кабінет може редагувати прайс
+else:
+    # Прайс у Google-таблиці: редагується там же, у кабінеті — лише перегляд.
+    PRICES_EDITABLE = False
+
+    def invalidate_prices_cache():
+        """У режимі sheets кеш скидається сам за TTL — робити нічого."""
+        return None
+
+    async def async_list_prices():
+        raise RuntimeError(
+            "Редактор прайсу працює лише з PRICES_BACKEND=postgres. "
+            "Зараз ціни живуть у Google-таблиці — редагуй їх там."
+        )
+
+    async def async_upsert_prices(items, updated_by=""):
+        raise RuntimeError(
+            "Редактор прайсу працює лише з PRICES_BACKEND=postgres. "
+            "Зараз ціни живуть у Google-таблиці — редагуй їх там."
+        )
