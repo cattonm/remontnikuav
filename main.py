@@ -26,6 +26,8 @@ import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 
+from storage import STORAGE_BACKEND, PRICES_BACKEND
+from security import AUTH_BACKEND
 from security import (ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users,
                       add_authorized_user, remove_authorized_user, clear_auth_cache,
                       ROLE_ADMIN, ROLE_MANAGER, get_role, create_invite, redeem_invite)
@@ -981,6 +983,13 @@ async def api_version(request):
         "uptime_min": round((time.time() - _STARTED_AT) / 60, 1),
         "prices": _PRICES_META,          # source: sheet|default, loaded_at, count
         "orders": orders_info,
+        # Які саме бекенди активні просто зараз. Без цього після кожного
+        # перемикання доводиться гадати, чи підхопилась змінна оточення.
+        "backends": {
+            "storage": STORAGE_BACKEND,   # заявки та чернетки
+            "prices": PRICES_BACKEND,     # прайс
+            "auth": AUTH_BACKEND,         # користувачі та інвайти
+        },
         "features": ["room_costs", "room_lines", "drafts", "prices_sheet", "trash", "web_cabinet"],
     })
 
