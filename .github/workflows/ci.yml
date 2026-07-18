@@ -47,9 +47,6 @@ jobs:
       - name: Синтаксис усіх .py
         run: python -m compileall -q . -x '\.git'
 
-      - name: Тести калькулятора
-        run: python -m pytest tests/ -q
-
       # Міграції ганяємо на СПРАВЖНЬОМУ Postgres (сервіс нижче).
       # Ловить: битий SQL, порушений порядок, неідемпотентний накат.
       # Двічі підряд — бо на проді база вже непорожня, і повторний
@@ -69,6 +66,17 @@ jobs:
         run: |
           python import_prices.py --from-defaults
           python import_prices.py --from-defaults --check
+
+      # Тести ганяємо ПІСЛЯ міграцій: інтеграційні тести авторизації
+      # (tests/test_security_pg.py) працюють зі справжніми таблицями і
+      # без DATABASE_URL просто пропускаються. Саме тут перевіряється, що
+      # інвайт неможливо погасити двічі.
+      - name: Тести (калькулятор, міграції, авторизація)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ci
+          BOT_TOKEN: '123456789:AAHfakeTokenForCiImportCheck_000000000'
+          GOOGLE_CREDS_JSON: '{}'
+        run: python -m pytest tests/ -q
 
       # Найважливіший крок: імітуємо старт на Render з фейковими env.
       # Саме тут ловиться "забув закомітити модуль" — той самий баг,
