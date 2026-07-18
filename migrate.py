@@ -95,6 +95,30 @@ def _applied(cur):
     return dict(cur.fetchall())
 
 
+
+def pending_versions(dsn=None):
+    """Міграції, які є на диску, але ще не накочені.
+
+    Окрема функція без sys.exit і без друку: її викликає main.py на старті,
+    щоб не мовчати, коли код уже вимагає нової колонки, а база її не має.
+    Будь-яка помилка = порожній список: перевірка схеми не має права
+    завалити запуск сервісу.
+    """
+    try:
+        conn = psycopg2.connect(dsn or os.getenv("DATABASE_URL"))
+    except Exception:
+        return []
+    try:
+        with conn.cursor() as cur:
+            done = _applied(cur)
+        conn.commit()
+        return [v for v, _, _, _ in discover() if v not in done]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
 def cmd_status(conn):
     with conn.cursor() as cur:
         done = _applied(cur)

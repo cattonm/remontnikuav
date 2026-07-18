@@ -83,6 +83,34 @@ else:
 _LOCKS = {}
 _STARTED_AT = time.time()
 
+# Заповнюється на старті (див. main()). Порожній список = схема актуальна.
+_PENDING_MIGRATIONS = []
+
+
+def _check_schema():
+    """Гучно попереджає, якщо база відстає від коду.
+
+    Не блокує запуск: сервіс має піднятись і віддавати те, що вміє, навіть
+    коли одна фіча зламана. Але мовчати про це не можна — саме так
+    втрачається година на пошук причини 500-ї помилки.
+    """
+    global _PENDING_MIGRATIONS
+    if STORAGE_BACKEND != "postgres" and PRICES_BACKEND != "postgres":
+        return
+    try:
+        from migrate import pending_versions
+        _PENDING_MIGRATIONS = pending_versions()
+    except Exception as e:
+        logging.warning("Не вдалося перевірити стан схеми БД: %s", e)
+        return
+    if _PENDING_MIGRATIONS:
+        logging.error(
+            "БАЗА ВІДСТАЄ ВІД КОДУ: не накочено %d міграцій (%s). "
+            "Частина функцій віддаватиме помилки, поки не виконаєш: python migrate.py up",
+            len(_PENDING_MIGRATIONS), ", ".join(_PENDING_MIGRATIONS))
+    else:
+        logging.info("Схема БД актуальна")
+
 def add_cors_headers(response, origin=None):
     # Відповідаємо конкретним origin лише якщо він у білому списку.
     # Для чужих origin заголовок не ставимо взагалі — браузер сам заблокує.
@@ -1066,6 +1094,10 @@ async def api_version(request):
         "orders": orders_info,
         # Які саме бекенди активні просто зараз. Без цього після кожного
         # перемикання доводиться гадати, чи підхопилась змінна оточення.
+        # Ненакочені міграції. Найпідступніший вид поломки: код уже вимагає
+        # нової колонки, база її ще не має, і зʼясовується це помилкою 500
+        # у клієнта. Тепер видно одразу тут і в логах старту.
+        "pending_migrations": _PENDING_MIGRATIONS,
         "backends": {
             "storage": STORAGE_BACKEND,   # заявки та чернетки
             "prices": PRICES_BACKEND,     # прайс
@@ -1277,6 +1309,7 @@ def main():
 
     if art_router is not None:
         dp.include_router(art_router)
+    _check_schema()
     app = web.Application()
     
     # Твої існуючі маршрути (по одному разу!)
