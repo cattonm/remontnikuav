@@ -80,7 +80,6 @@ if GEMINI_API_KEY:
 else:
     model = None
 
-_THROTTLE_CACHE = {}
 _LOCKS = {}
 _STARTED_AT = time.time()
 
@@ -104,13 +103,6 @@ def cors(handler):
         return add_cors_headers(response, origin)
     return wrapper
 
-def is_throttled(user_id, action, delay=10):
-    key = f"{user_id}_{action}"
-    now = time.time()
-    if key in _THROTTLE_CACHE and now - _THROTTLE_CACHE[key] < delay:
-        return True
-    _THROTTLE_CACHE[key] = now
-    return False
 
 def validate_telegram_data(init_data: str, bot_token: str):
     try:
@@ -438,17 +430,37 @@ async def api_save_order(request):
 # Захист: rate-limit по IP + honeypot-поле. CAPTCHA свідомо не ставлю —
 # вона вбиває конверсію, а ставки тут невисокі.
 # ==========================================================
-_LEAD_RATE = {}          # {ip: [timestamps]}
+# Ліміти на публічні (без авторизації) ендпоінти — по IP, у памʼяті процесу.
+# Це не захист від цілеспрямованої атаки (для неї потрібен Cloudflare), а
+# запобіжник від скрипта-переборника й від випадкового циклу у фронтенді,
+# який здатен покласти єдиний інстанс на безкоштовному тарифі Render.
+_RATE_BUCKETS = {}       # {(bucket, ip): [timestamps]}
 LEAD_MAX_PER_HOUR = 5
+CALC_MAX_PER_MINUTE = 60     # калькулятор рахує на кожну зміну — ліміт щедрий
+LOGIN_MAX_PER_HOUR = 30
 
-def _rate_limited(ip):
+def _client_ip(request):
+    """IP за проксі Render. Беремо перший у X-Forwarded-For — саме він клієнтський."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() if fwd else (request.remote or "")).strip()
+
+
+def _rate_limited(ip, bucket="lead", limit=LEAD_MAX_PER_HOUR, window=3600):
+    """True, якщо цей IP вичерпав ліміт у цьому вікні.
+
+    Лічильники окремі на кожен bucket: флуд калькулятора не має блокувати
+    людині можливість надіслати заявку.
+    """
+    if not ip:
+        return False
     now = time.time()
-    hits = [t for t in _LEAD_RATE.get(ip, []) if now - t < 3600]
+    key = (bucket, ip)
+    hits = [t for t in _RATE_BUCKETS.get(key, []) if now - t < window]
     hits.append(now)
-    _LEAD_RATE[ip] = hits
-    if len(_LEAD_RATE) > 5000:      # не даємо словнику рости нескінченно
-        _LEAD_RATE.clear()
-    return len(hits) > LEAD_MAX_PER_HOUR
+    _RATE_BUCKETS[key] = hits
+    if len(_RATE_BUCKETS) > 5000:      # не даємо словнику рости нескінченно
+        _RATE_BUCKETS.clear()
+    return len(hits) > limit
 
 @cors
 async def api_submit_lead(request):
@@ -458,8 +470,7 @@ async def api_submit_lead(request):
         if data.get("website"):
             return web.json_response({"success": True})   # вдаємо успіх, мовчки ігноруємо
 
-        ip = request.headers.get("X-Forwarded-For", request.remote or "").split(",")[0].strip()
-        if _rate_limited(ip):
+        if _rate_limited(_client_ip(request), "lead", LEAD_MAX_PER_HOUR):
             return web.json_response({"error": "too_many_requests"}, status=429)
 
         c = data.get("client") or {}
@@ -561,6 +572,8 @@ def _cleanup_login_codes():
 @cors
 async def api_login_start(request):
     """Видає одноразовий код і deep link на бота."""
+    if _rate_limited(_client_ip(request), "login", LOGIN_MAX_PER_HOUR):
+        return web.json_response({"error": "too_many_requests"}, status=429)
     _cleanup_login_codes()
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     code = "".join(secrets.choice(alphabet) for _ in range(6))
@@ -1058,11 +1071,14 @@ async def api_version(request):
             "prices": PRICES_BACKEND,     # прайс
             "auth": AUTH_BACKEND,         # користувачі та інвайти
         },
-        "features": ["room_costs", "room_lines", "drafts", "prices_sheet", "trash", "web_cabinet"],
+        "features": ["room_costs", "room_lines", "drafts", "prices_db", "trash", "web_cabinet"],
     })
 
 @cors
 async def api_live_calc(request):
+    # Єдиний важкий публічний ендпоінт: рахує повний кошторис на кожен запит.
+    if _rate_limited(_client_ip(request), "calc", CALC_MAX_PER_MINUTE, window=60):
+        return web.json_response({"error": "too_many_requests"}, status=429)
     try:
         data = await request.json()
         data_with_virtual_meas = apply_virtual_measurements(data)

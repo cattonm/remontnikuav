@@ -4,6 +4,7 @@
 його може безпечно підтягувати будь-який інший модуль без циклічних залежностей.
 """
 import os
+import logging
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -28,7 +29,16 @@ WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
 # Витік токена бота більше не дозволяє підробити чужу сесію.
 # Фолбек на BOT_TOKEN лишений лише щоб уже видані сесії не протухли миттєво
 # після деплою; після заведення SESSION_SECRET в env — прибрати фолбек.
-SESSION_SECRET = os.getenv('SESSION_SECRET') or BOT_TOKEN
+SESSION_SECRET = os.getenv('SESSION_SECRET')
+if not SESSION_SECRET:
+    # Мовчазний фолбек — найгірший вид технічного боргу: він працює, тому про
+    # нього забувають. Тепер він видно в логах при кожному старті.
+    logging.warning(
+        "SESSION_SECRET не заданий — сесії підписуються BOT_TOKEN. "
+        "Витік токена бота в такому разі дозволяє підробити чужу сесію. "
+        "Заведи SESSION_SECRET в оточенні: будь-який довгий випадковий рядок."
+    )
+    SESSION_SECRET = BOT_TOKEN
 
 # Домени, яким дозволено ходити в API з браузера (CORS).
 # '*' відкривав ендпоінти лідів/чернеток будь-якому сайту.
