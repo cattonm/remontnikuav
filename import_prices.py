@@ -17,10 +17,40 @@ import os
 import sys
 import argparse
 
+# .env підвантажуємо самі: `export $(cat .env | xargs)` ламається на значеннях
+# з лапками й пробілами — а GOOGLE_CREDS_JSON саме такий. python-dotenv уже є
+# в requirements.txt. У проді (Render) .env немає — там змінні задані в
+# оточенні, і load_dotenv() просто нічого не робить.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
 
 def _load_from_sheets():
-    from storage_sheets import _get_prices_sync, get_price_labels
+    """Ціни з аркуша «Ціни».
+
+    ВАЖЛИВО: storage_sheets навмисно «незламний» — якщо Google недоступний,
+    він мовчки віддає DEFAULT_PRICES, щоб не повалити калькулятор у проді.
+    Для ІМПОРТУ це рівно навпаки: тихо залити в базу дефолти замість реальних
+    цін компанії — найгірший можливий результат, бо помітиш це вже по кривих
+    кошторисах. Тому тут ми перевіряємо, звідки насправді приїхали дані, і
+    падаємо, якщо це не аркуш.
+    """
+    if not os.getenv("GOOGLE_CREDS_JSON"):
+        sys.exit("GOOGLE_CREDS_JSON не заданий — до Google-таблиці не достукатись.\n"
+                 "Візьми його в Render -> Environment і додай у .env, або, якщо\n"
+                 "свідомо хочеш залити ціни з коду: python import_prices.py --from-defaults")
+
+    from storage_sheets import _get_prices_sync, get_price_labels, _PRICES_META
     prices = _get_prices_sync()
+    if _PRICES_META.get("source") != "sheet":
+        sys.exit("Прочитати аркуш «Ціни» НЕ вдалося — вище має бути причина.\n"
+                 "Імпорт зупинено, щоб не залити в базу дефолтні ціни замість твоїх.\n"
+                 "Полагодь доступ до Google або запусти явно: "
+                 "python import_prices.py --from-defaults")
     labels = get_price_labels()
     if not labels:
         print("Увага: з аркуша не прочиталась жодна назва — беру назви з коду.")

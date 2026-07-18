@@ -34,6 +34,17 @@ import argparse
 
 import psycopg2
 
+# .env підвантажуємо самі: `export $(cat .env | xargs)` ламається на значеннях
+# з лапками й пробілами — а GOOGLE_CREDS_JSON саме такий. python-dotenv уже є
+# в requirements.txt. У проді (Render) .env немає — там змінні задані в
+# оточенні, і load_dotenv() просто нічого не робить.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
 MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
 
 # Довільний, але сталий ключ. Гарантує, що два одночасні деплої не
