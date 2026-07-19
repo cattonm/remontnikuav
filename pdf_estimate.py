@@ -76,6 +76,26 @@ def _money(value):
         return "0"
 
 
+def _human_date(value):
+    """«2026-07-19 11:07» -> «19.07.2026».
+
+    У базі дата лежить у тому вигляді, у якому її записав бот, і формат
+    за роки встиг помінятись. Клієнтові ж потрібен звичайний день —
+    без годин і без ISO. Незнайомий формат віддаємо як є: краще показати
+    щось дивне, ніж загубити дату зовсім.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return datetime.now().strftime("%d.%m.%Y")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%d.%m.%Y %H:%M", "%d.%m.%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%d.%m.%Y")
+        except ValueError:
+            continue
+    return text
+
+
 def _styles(accent):
     base = FONT if _FONTS_READY else "Helvetica"
     bold = FONT_BOLD if _FONTS_READY else "Helvetica-Bold"
@@ -172,8 +192,7 @@ def build_estimate_pdf(order, budget, rooms=None, branding=None):
             ("Телефон", order.get("phone")),
             ("Обʼєкт", order.get("type") or order.get("object_type")),
             ("Адреса", order.get("address")),
-            ("Дата", order.get("date") or order.get("date_text")
-             or datetime.now().strftime("%d.%m.%Y"))]
+            ("Дата", _human_date(order.get("date") or order.get("date_text")))]
     info_rows = [[Paragraph(k, st["small"]), Paragraph(str(v), st["p"])]
                  for k, v in info if v]
     if info_rows:

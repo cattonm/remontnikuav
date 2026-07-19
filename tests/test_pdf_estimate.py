@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from pdf_estimate import build_estimate_pdf, _money, _ensure_fonts
+from pdf_estimate import build_estimate_pdf, _money, _ensure_fonts, _human_date
 
 ORDER = {"name": "Олена Ткаченко", "phone": "+380671234567",
          "type": "Квартира", "address": "вул. Хрещатик 1 · 78 м²",
@@ -88,6 +88,29 @@ def test_survives_empty_rooms_and_lines():
 def test_survives_missing_order_fields():
     pdf = build_estimate_pdf({}, BUDGET, ROOMS)
     assert pdf[:5] == b"%PDF-"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-07-19 11:07", "19.07.2026"),     # так дату пише бот у БД
+    ("2026-07-19 11:07:33", "19.07.2026"),
+    ("2026-07-19", "19.07.2026"),
+    ("19.07.2026", "19.07.2026"),           # уже в потрібному вигляді
+    ("18.07.2026 09:15", "18.07.2026"),
+])
+def test_date_is_humanized(raw, expected):
+    """У документі для клієнта не місце технічній мітці часу."""
+    assert _human_date(raw) == expected
+
+
+def test_unknown_date_format_is_kept_as_is():
+    """Краще показати дивну дату, ніж загубити її зовсім."""
+    assert _human_date("колись у липні") == "колись у липні"
+
+
+def test_empty_date_falls_back_to_today():
+    from datetime import datetime
+    assert _human_date("") == datetime.now().strftime("%d.%m.%Y")
+    assert _human_date(None) == datetime.now().strftime("%d.%m.%Y")
 
 
 @pytest.mark.parametrize("value,expected", [
