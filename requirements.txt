@@ -17,3 +17,4 @@ pytest==8.3.3
 
 # Postgres (Етап 3; використовується лише коли STORAGE_BACKEND=postgres)
 psycopg2-binary==2.9.10
+reportlab==4.4.10   # PDF-кошторис для клієнта

@@ -27,7 +27,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from storage import (STORAGE_BACKEND, PRICES_BACKEND, PRICES_EDITABLE,
-                     async_list_prices, async_upsert_prices)
+                     async_list_prices, async_upsert_prices, get_tenant_branding)
 from security import AUTH_BACKEND
 from security import (ADMIN_PASSWORD, MASTER_ADMIN_ID, is_authorized, get_all_authorized_users,
                       add_authorized_user, remove_authorized_user, clear_auth_cache,
@@ -811,21 +811,26 @@ async def api_orders(request):
         "has_more": offset + limit < len(orders),
     })
 
-@cors
-async def api_order_detail(request):
-    """Повна заявка + порахований кошторис. Викликається лише коли менеджер
-    розгортає конкретну картку — тож важкий JSON читаємо точково."""
+async def _load_order_bundle(request):
+    """Заявка + кошторис + розбивка по кімнатах, із перевіркою прав.
+
+    Спільний код для картки заявки і для PDF: обидва показують те саме,
+    тож збирати дані двічі означало б гарантовано їх розсинхронити.
+
+    Повертає (payload, помилка). Помилка — готова відповідь, якщо доступу
+    немає або заявки не існує.
+    """
     uid, role = auth_request(request)
     if not uid:
-        return web.json_response({"error": "unauthorized"}, status=401)
+        return None, web.json_response({"error": "unauthorized"}, status=401)
     try:
         row_id = int(request.query.get("row"))
     except (TypeError, ValueError):
-        return web.json_response({"error": "bad_row"}, status=400)
+        return None, web.json_response({"error": "bad_row"}, status=400)
 
     row = await async_get_row_data(row_id)
     if not row:
-        return web.json_response({"error": "not_found"}, status=404)
+        return None, web.json_response({"error": "not_found"}, status=404)
     m = _row_meta(row)
 
     # Менеджер не має бачити чужі заявки навіть за прямим row_id
@@ -833,7 +838,7 @@ async def api_order_detail(request):
         mine = m["manager_id"] == str(uid)
         free_lead = (m["source"] == "web" and not m["manager_id"])
         if not (mine or free_lead):
-            return web.json_response({"error": "forbidden"}, status=403)
+            return None, web.json_response({"error": "forbidden"}, status=403)
 
     budget = None
     rooms = []
@@ -858,11 +863,58 @@ async def api_order_detail(request):
             "general_lines": b.get("general_lines") or [],
         }
     except Exception:
-        logging.exception("order_detail: не вдалося порахувати кошторис для рядка %s", row_id)
+        logging.exception("не вдалося порахувати кошторис для рядка %s", row_id)
 
     m["manager_name"] = get_all_authorized_users().get(m["manager_id"], {}).get("name", "") if m["manager_id"] else ""
     m["report"] = row[6] if len(row) > 6 else ""   # збережений ТЗ (для показу/перегенерації на сайті)
-    return web.json_response({"order": m, "budget": budget, "rooms": rooms})
+    return {"row_id": row_id, "order": m, "budget": budget, "rooms": rooms}, None
+
+
+@cors
+async def api_order_detail(request):
+    """Повна заявка + порахований кошторис. Викликається лише коли менеджер
+    розгортає конкретну картку — тож важкий JSON читаємо точково."""
+    data, err = await _load_order_bundle(request)
+    if err:
+        return err
+    return web.json_response({"order": data["order"], "budget": data["budget"],
+                              "rooms": data["rooms"]})
+
+
+@cors
+async def api_order_pdf(request):
+    """Кошторис у PDF — те, що менеджер надсилає клієнту.
+
+    Генерація в потоці: reportlab синхронний, а на великій заявці це
+    десятки мілісекунд, які не варто відбирати в циклу подій.
+    """
+    data, err = await _load_order_bundle(request)
+    if err:
+        return err
+    if not data["budget"]:
+        return web.json_response(
+            {"error": "no_budget",
+             "message": "Кошторис порахувати не вдалося — перевірте анкету."}, status=422)
+
+    try:
+        from pdf_estimate import build_estimate_pdf
+        branding = await asyncio.to_thread(get_tenant_branding)
+        pdf = await asyncio.to_thread(build_estimate_pdf, data["order"],
+                                      data["budget"], data["rooms"], branding)
+    except Exception:
+        logging.exception("не вдалося зібрати PDF для рядка %s", data["row_id"])
+        return web.json_response({"error": "pdf_failed"}, status=500)
+
+    client = (data["order"].get("name") or "obiekt").strip()
+    safe = "".join(ch for ch in client if ch.isalnum() or ch in " -_")[:40].strip() or "obiekt"
+    return web.Response(
+        body=pdf, content_type="application/pdf",
+        headers={
+            # inline — щоб на телефоні відкрилось у переглядачі, а не пішло
+            # одразу в «Завантаження», звідки його ще треба шукати.
+            "Content-Disposition": f'inline; filename="koshtorys-{data["row_id"]}.pdf"',
+            "X-Client-Name": safe,
+        })
 
 @cors
 async def api_generate_report(request):
@@ -1350,6 +1402,8 @@ def main():
     app.router.add_options('/api/admin/invite', api_admin_invite)
     app.router.add_post('/api/admin/revoke', api_admin_revoke)
     app.router.add_options('/api/admin/revoke', api_admin_revoke)
+    app.router.add_get('/api/order_pdf', api_order_pdf)
+    app.router.add_options('/api/order_pdf', api_order_pdf)
     app.router.add_get('/api/admin/prices', api_admin_prices)
     app.router.add_options('/api/admin/prices', api_admin_prices)
     app.router.add_post('/api/admin/prices/save', api_admin_prices_save)

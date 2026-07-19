@@ -551,3 +551,39 @@ async def async_list_prices():
 
 async def async_upsert_prices(items, updated_by=""):
     return await asyncio.to_thread(_upsert_prices_sync, items, updated_by)
+
+
+# ══════════════════════════════════════════════════════════
+# НАЛАШТУВАННЯ ТЕНАНТА (брендинг для PDF, і далі — для віджета)
+# ══════════════════════════════════════════════════════════
+_TENANT_CACHE = None
+_TENANT_CACHE_TIME = 0
+_TENANT_CACHE_TTL = 300
+
+
+def get_tenant_branding():
+    """Назва компанії, контакти й акцентний колір із tenants.settings.
+
+    Порожній результат — не помилка: PDF має свої значення за замовчуванням.
+    На Етапі B тенант братиметься із сесії, поки що це TENANT_ID з оточення.
+    """
+    global _TENANT_CACHE, _TENANT_CACHE_TIME
+    now = time.time()
+    if _TENANT_CACHE is not None and (now - _TENANT_CACHE_TIME) < _TENANT_CACHE_TTL:
+        return _TENANT_CACHE
+    data = {}
+    try:
+        with _conn() as con, con.cursor() as cur:
+            cur.execute("SELECT name, settings FROM tenants WHERE id = %s", (TENANT_ID,))
+            row = cur.fetchone()
+        if row:
+            name, settings = row
+            data = dict(settings or {})
+            if name and not data.get("company"):
+                data["company"] = name
+    except Exception as e:
+        logging.warning("Не вдалося прочитати налаштування тенанта: %s", e)
+        return _TENANT_CACHE or {}
+    _TENANT_CACHE = data
+    _TENANT_CACHE_TIME = now
+    return data

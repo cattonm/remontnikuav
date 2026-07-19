@@ -69,9 +69,14 @@ if PRICES_BACKEND == "postgres":
         async_upsert_prices, invalidate_prices_cache,
     )
     PRICES_EDITABLE = True          # кабінет може редагувати прайс
+    from storage_postgres import get_tenant_branding
 else:
     # Прайс у Google-таблиці: редагується там же, у кабінеті — лише перегляд.
     PRICES_EDITABLE = False
+
+    def get_tenant_branding():
+        """Без БД брендинг брати нізвідки — PDF візьме свої дефолти."""
+        return {}
 
     def invalidate_prices_cache():
         """У режимі sheets кеш скидається сам за TTL — робити нічого."""
