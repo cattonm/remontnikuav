@@ -89,3 +89,100 @@ def test_module_imports(module):
     """Імітація старту на Render: кожен модуль мусить імпортуватись сам по собі.
     Саме тут ловиться «забув закомітити файл» — історичний режим відмови."""
     __import__(module)
+
+
+# ==========================================================
+# ЖИТТЄВИЙ ЦИКЛ: startup / shutdown
+# ----------------------------------------------------------
+# Ці хендлери НЕ виконуються при імпорті — тому помилка в них не видно
+# ні лінтеру, ні збірці застосунку. Вона вилазить лише в проді, при
+# першому реальному запуску. Саме так деплой упав з
+#   TypeError: on_startup() missing 1 required positional argument: '_bot'
+# бо параметр назвали _bot, а aiogram підставляє залежності ПО ІМЕНІ.
+# ==========================================================
+
+# Імена, які aiogram кладе у workflow_data і може підставити в хендлер.
+_INJECTABLE = {"bot", "dispatcher", "dp", "router", "event_router", "workflow_data"}
+
+
+@pytest.mark.parametrize("fn_name", ["on_startup", "on_shutdown"])
+def test_lifecycle_handler_params_are_injectable(fn_name):
+    """Кожен параметр мусить або мати ім'я, яке aiogram уміє підставити,
+    або мати значення за замовчуванням. Інакше старт впаде в проді."""
+    import inspect
+    import main
+
+    fn = getattr(main, fn_name)
+    for name, p in inspect.signature(fn).parameters.items():
+        injectable = name in _INJECTABLE
+        has_default = p.default is not inspect.Parameter.empty
+        assert injectable or has_default, (
+            f"{fn_name}({name}): aiogram не знає, що підставити в цей параметр. "
+            f"Назви його одним із {sorted(_INJECTABLE)} або дай значення за замовчуванням."
+        )
+
+
+def test_on_startup_actually_runs():
+    """НАЙВАЖЛИВІШИЙ тест цього файлу: реально проганяє startup через
+    диспетчер aiogram — так само, як це робить web.run_app у проді.
+
+    Побічні ефекти прибрані: мережевий виклик замінено заглушкою, а три
+    фонові цикли — порожньою корутиною. Перевіряємо саме те, що падало:
+    чи вміє aiogram викликати наш хендлер.
+    """
+    import asyncio
+    from aiogram import Dispatcher
+    import main
+
+    called = []
+
+    class FakeBot:
+        async def set_webhook(self, *a, **k):
+            called.append("set_webhook")
+
+    async def noop():
+        return None
+
+    async def go():
+        saved = (main.STORAGE_BACKEND, main.clean_locks_periodically,
+                 main.async_get_prices, main.remind_about_drafts_periodically)
+        # postgres-гілка не чіпає Google; фонові задачі — заглушки
+        main.STORAGE_BACKEND = "postgres"
+        main.clean_locks_periodically = noop
+        main.async_get_prices = noop
+        main.remind_about_drafts_periodically = noop
+        try:
+            d = Dispatcher()
+            d.startup.register(main.on_startup)
+            await d.emit_startup(bot=FakeBot())
+            await asyncio.sleep(0)      # даємо створеним задачам завершитись
+        finally:
+            (main.STORAGE_BACKEND, main.clean_locks_periodically,
+             main.async_get_prices, main.remind_about_drafts_periodically) = saved
+
+    asyncio.run(go())
+    assert called == ["set_webhook"], "startup не дійшов до встановлення вебхука"
+
+
+def test_on_shutdown_actually_runs():
+    """Те саме для shutdown — він теж викликається лише в проді."""
+    import asyncio
+    from aiogram import Dispatcher
+    import main
+
+    closed = []
+
+    class FakeSession:
+        async def close(self):
+            closed.append("closed")
+
+    class FakeBot:
+        session = FakeSession()
+
+    async def go():
+        d = Dispatcher()
+        d.shutdown.register(main.on_shutdown)
+        await d.emit_shutdown(bot=FakeBot())
+
+    asyncio.run(go())
+    assert closed == ["closed"]

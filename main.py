@@ -44,7 +44,12 @@ except ImportError:
     logging.warning("art_curator.py не знайдено — стартуємо без цього роутера.")
 
 
-async def on_startup(_bot: Bot):
+async def on_startup(bot: Bot):
+    # ⚠️ ІМ'Я ПАРАМЕТРА ЗНАЧУЩЕ. aiogram підставляє залежності ПО ІМЕНІ:
+    # у startup-хендлер він передає kwargs {bot, dispatcher, ...} і фільтрує
+    # їх за сигнатурою. Параметр, названий інакше (напр. _bot), не отримає
+    # нічого — і виклик впаде з "missing 1 required positional argument"
+    # уже в проді, бо на імпорті це не видно. Перевіряє tests/test_routes.py.
     # Google чіпаємо, ЛИШЕ якщо заявки справді лежать в аркушах. У
     # postgres-режимі цей виклик просто ліз до мертвого ключа при кожному
     # старті й засмічував логи помилкою авторизації.
@@ -54,7 +59,7 @@ async def on_startup(_bot: Bot):
         # повертаємо шапку на місце (заявка з'їжджає на рядок 2 і стає видимою).
         asyncio.create_task(async_ensure_header())
     try:
-        await _bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
+        await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
     except Exception:
         logging.exception("Не вдалося встановити вебхук")
     asyncio.create_task(clean_locks_periodically())
@@ -62,8 +67,8 @@ async def on_startup(_bot: Bot):
     asyncio.create_task(remind_about_drafts_periodically())  # нагадування раз на годину
 
 
-async def on_shutdown(_bot: Bot):
-    await _bot.session.close()
+async def on_shutdown(bot: Bot):
+    await bot.session.close()
 
 
 def create_app():
