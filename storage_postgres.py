@@ -39,12 +39,33 @@ from security import ROLE_ADMIN
 _POOL = None
 
 
+def _check_dsn(dsn):
+    """Перевіряє форму рядка підключення і пояснює помилку людською мовою.
+
+    ЧОМУ ЦЕ ПОТРІБНО. Найчастіша описка при ротації пароля — вставити
+    ПОВНИЙ новий URL у місце, де має бути лише пароль. Виходить
+    postgresql://user:postgresql://user:pass@host:5432/db@host:5432/db
+    Психопг у відповідь каже `invalid integer value "postgresql:" for
+    connection option "port"` — і на пошук причини йде півгодини.
+    """
+    if dsn.count("://") > 1:
+        raise RuntimeError(
+            "DATABASE_URL зіпсований: рядок підключення вставлено всередину "
+            "самого себе (схема '://' трапляється двічі). Схоже, при ротації "
+            "пароля туди поклали ПОВНИЙ URL замість самого пароля. "
+            "Правильний вигляд: postgresql://КОРИСТУВАЧ:ПАРОЛЬ@ХОСТ:5432/postgres")
+    if not dsn.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "DATABASE_URL має починатись з postgresql:// — зараз там щось інше.")
+
+
 def _get_pool():
     global _POOL
     if _POOL is None:
         dsn = os.getenv("DATABASE_URL")
         if not dsn:
             raise RuntimeError("STORAGE_BACKEND=postgres, але DATABASE_URL не заданий")
+        _check_dsn(dsn)
         _POOL = ThreadedConnectionPool(1, 8, dsn)
     return _POOL
 

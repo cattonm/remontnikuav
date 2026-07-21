@@ -130,11 +130,11 @@ pg_only = pytest.mark.skipif(not os.getenv("DATABASE_URL"),
 def test_endpoint_requires_auth():
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
-    import main
+    import api_orders
 
     async def go():
         app = web.Application()
-        app.router.add_get('/api/order_pdf', main.api_order_pdf)
+        app.router.add_get('/api/order_pdf', api_orders.api_order_pdf)
         async with TestClient(TestServer(app)) as cli:
             return (await cli.get('/api/order_pdf?row=1')).status
 
@@ -145,19 +145,19 @@ def test_endpoint_requires_auth():
 def test_endpoint_rejects_bad_row():
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
-    import main
+    import api_orders
 
     async def go():
         app = web.Application()
-        app.router.add_get('/api/order_pdf', main.api_order_pdf)
-        original = main.auth_request
-        main.auth_request = lambda request: ("1", "admin")
+        app.router.add_get('/api/order_pdf', api_orders.api_order_pdf)
+        original = api_orders.auth_request
+        api_orders.auth_request = lambda request: ("1", "admin")
         try:
             async with TestClient(TestServer(app)) as cli:
                 bad = (await cli.get('/api/order_pdf?row=абв')).status
                 missing = (await cli.get('/api/order_pdf?row=99999999')).status
                 return bad, missing
         finally:
-            main.auth_request = original
+            api_orders.auth_request = original
 
     assert asyncio.run(go()) == (400, 404)

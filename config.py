@@ -11,7 +11,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON') 
 SPREADSHEET_NAME = "remonts sheets" 
 
-GROUP_CHAT_ID = "-5265068775" # Замінити на свій ID групи
+# ID робочої групи для команди /upd. Раніше було захардкоджено в коді —
+# тобто змінити його можна було лише деплоєм, а в публічному репозиторії
+# він був видний усім. Тепер з оточення, старе значення лишене фолбеком,
+# щоб команда не зламалась до заведення змінної на Render.
+GROUP_CHAT_ID = os.getenv('GROUP_CHAT_ID', "-5265068775")
 
 WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 10000

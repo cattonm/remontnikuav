@@ -85,18 +85,24 @@ jobs:
 
       # Найважливіший крок: імітуємо старт на Render з фейковими env.
       # Саме тут ловиться "забув закомітити модуль" — той самий баг,
-      # через який прод місяцями крутив стару версію.
-      - name: Імпорт main.py (імітація старту на Render)
+      # через який прод місяцями крутив стару версію. Після розділення
+      # main.py перевіряємо не окремі функції, а ЗІБРАНИЙ застосунок:
+      # так само впаде, якщо загубився будь-який із модулів api_*.
+      - name: Старт застосунку (імітація Render)
         env:
           BOT_TOKEN: '123456789:AAHfakeTokenForCiImportCheck_000000000'
           GEMINI_API_KEY: 'fake'
           GOOGLE_CREDS_JSON: '{}'
           RENDER_EXTERNAL_URL: 'https://example.onrender.com'
+          WEBHOOK_SECRET: 'ci-webhook-secret'
+          SESSION_SECRET: 'ci-secret'
         run: |
           python -c "
-          import main
-          assert hasattr(main, 'api_live_calc'), 'немає ендпоінта live_calc'
-          assert hasattr(main, 'api_version'), 'немає ендпоінта /version'
-          assert main.DEFAULT_PRICES, 'порожній прайс'
-          print('OK: main.py імпортується, ендпоінти на місці')
+          import main, config
+          app = main.create_app()
+          paths = {r.resource.canonical for r in app.router.routes()}
+          for need in ('/api/live_calc', '/api/orders', '/api/order_pdf', '/version', '/ping'):
+              assert need in paths, 'немає маршруту ' + need
+          assert config.DEFAULT_PRICES, 'порожній прайс'
+          print('OK: застосунок збирається, маршрутів', len(paths))
           "

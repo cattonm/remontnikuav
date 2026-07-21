@@ -4,75 +4,86 @@
 проганяє свій сценарій через asyncio.run(). Так набір лишається на
 чистому pytest.
 
-Пропускаються без DATABASE_URL (локально) — у CI виконуються.
+Пропускаються, якщо немає БД АБО прайс читається не з неї.
+
+ЧОМУ ДВІ УМОВИ, А НЕ ОДНА. Раніше стояла тільки перевірка DATABASE_URL —
+і в codespace, де база задана, а PRICES_BACKEND лишився дефолтним
+(sheets), усі тести падали з 409 read_only. Це не поломка коду: редактор
+прайсу свідомо вимкнений, поки ціни живуть у Google-таблиці. Тест має це
+розуміти й пропускатись, а не червоніти.
 """
 import os
 import asyncio
 
 import pytest
 
+_HAS_DB = bool(os.getenv("DATABASE_URL"))
+_PRICES_IN_DB = os.getenv("PRICES_BACKEND", "sheets").lower() == "postgres"
+
 pytestmark = pytest.mark.skipif(
-    not os.getenv("DATABASE_URL"),
-    reason="потрібен DATABASE_URL (у CI задається сервісом postgres)")
+    not (_HAS_DB and _PRICES_IN_DB),
+    reason="потрібні DATABASE_URL і PRICES_BACKEND=postgres "
+           "(у CI задається; локально: PRICES_BACKEND=postgres pytest tests/)")
 
 
-def _app_and_main():
+def _app_and_module():
+    """Ендпоінти прайсу живуть в api_admin (після розділення main.py)."""
     from aiohttp import web
-    import main
+    import api_admin as mod
     app = web.Application()
-    app.router.add_get('/api/admin/prices', main.api_admin_prices)
-    app.router.add_post('/api/admin/prices/save', main.api_admin_prices_save)
-    return app, main
+    app.router.add_get('/api/admin/prices', mod.api_admin_prices)
+    app.router.add_post('/api/admin/prices/save', mod.api_admin_prices_save)
+    return app, mod
 
 
 def _run(scenario):
-    """Піднімає тестовий сервер і віддає сценарію (client, main)."""
+    """Піднімає тестовий сервер і віддає сценарію (client, module)."""
     from aiohttp.test_utils import TestClient, TestServer
 
     async def go():
-        app, main = _app_and_main()
+        app, mod = _app_and_module()
         async with TestClient(TestServer(app)) as cli:
-            return await scenario(cli, main)
+            return await scenario(cli, mod)
 
     return asyncio.run(go())
 
 
-def _as(main, uid, role):
+def _as(mod, uid, role):
     """Підміняє перевірку сесії — токени тут не тестуємо, лише права."""
-    main.auth_request = lambda request: (uid, role)
+    mod.auth_request = lambda request: (uid, role)
 
 
 def test_anonymous_forbidden():
-    async def scenario(cli, main):
+    async def scenario(cli, mod):
         return (await cli.get('/api/admin/prices')).status
     assert _run(scenario) == 403
 
 
 def test_manager_forbidden():
-    async def scenario(cli, main):
-        original = main.auth_request
-        _as(main, "555", "manager")
+    async def scenario(cli, mod):
+        original = mod.auth_request
+        _as(mod, "555", "manager")
         try:
             get = (await cli.get('/api/admin/prices')).status
             post = (await cli.post('/api/admin/prices/save',
                                    json={"items": [{"key": "room_lam", "work": 1}]})).status
             return get, post
         finally:
-            main.auth_request = original
+            mod.auth_request = original
     assert _run(scenario) == (403, 403)
 
 
 def test_admin_gets_full_price_list():
     """Редактор мусить бачити ВСІ позиції калькулятора, а не лише збережені —
     інакше на свіжій базі екран був би порожній."""
-    async def scenario(cli, main):
-        original = main.auth_request
-        _as(main, "1", "admin")
+    async def scenario(cli, mod):
+        original = mod.auth_request
+        _as(mod, "1", "admin")
         try:
             res = await cli.get('/api/admin/prices')
             return res.status, await res.json()
         finally:
-            main.auth_request = original
+            mod.auth_request = original
 
     status, data = _run(scenario)
     from config import DEFAULT_PRICES
@@ -92,21 +103,21 @@ def test_admin_gets_full_price_list():
     ({"items": [{"key": "x", "work": 1}] * 501}, 400),       # надто багато
 ])
 def test_bad_payload_rejected(payload, expected):
-    async def scenario(cli, main):
-        original = main.auth_request
-        _as(main, "1", "admin")
+    async def scenario(cli, mod):
+        original = mod.auth_request
+        _as(mod, "1", "admin")
         try:
             return (await cli.post('/api/admin/prices/save', json=payload)).status
         finally:
-            main.auth_request = original
+            mod.auth_request = original
     assert _run(scenario) == expected
 
 
 def test_save_round_trip():
     """Збережене значення мусить читатись назад тим самим."""
-    async def scenario(cli, main):
-        original = main.auth_request
-        _as(main, "42", "admin")
+    async def scenario(cli, mod):
+        original = mod.auth_request
+        _as(mod, "42", "admin")
         try:
             await cli.post('/api/admin/prices/save', json={"items": [
                 {"key": "room_lam", "label": "Ламінат", "unit": "м²",
@@ -116,7 +127,7 @@ def test_save_round_trip():
             row = next(p for p in data["prices"] if p["key"] == "room_lam")
             return row
         finally:
-            main.auth_request = original
+            mod.auth_request = original
 
     row = _run(scenario)
     assert row["work"] == 123.45
@@ -127,9 +138,9 @@ def test_save_round_trip():
 
 def test_swapped_bounds_are_fixed_not_rejected():
     """«Матеріал від 900 до 600» — описка, а не привід губити введене."""
-    async def scenario(cli, main):
-        original = main.auth_request
-        _as(main, "1", "admin")
+    async def scenario(cli, mod):
+        original = mod.auth_request
+        _as(mod, "1", "admin")
         try:
             status = (await cli.post('/api/admin/prices/save', json={"items": [
                 {"key": "wall_paint", "work": 100, "mat_min": 900, "mat_max": 600}]})).status
@@ -137,7 +148,7 @@ def test_swapped_bounds_are_fixed_not_rejected():
             row = next(p for p in data["prices"] if p["key"] == "wall_paint")
             return status, row["mat_min"], row["mat_max"]
         finally:
-            main.auth_request = original
+            mod.auth_request = original
 
     status, mat_min, mat_max = _run(scenario)
     assert status == 200

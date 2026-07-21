@@ -1,0 +1,18 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+
+# Персональні дані й вивантаження — не місце в репозиторії
+admins.csv
+prices.csv
+download/
+*.zip
+
+# Локальні артефакти
+.pytest_cache/
+.coverage
+htmlcov/
